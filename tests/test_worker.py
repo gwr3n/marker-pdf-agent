@@ -409,6 +409,17 @@ def test_ollama_path_like_response_reuses_existing_top_level_folder(monkeypatch)
     assert folder == "tufte-latex-documentation"
 
 
+def test_ollama_path_like_response_ignores_converted_prefix(monkeypatch) -> None:
+    def fake_run(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, 0, stdout="converted/invoices\n", stderr="")
+
+    monkeypatch.setattr("marker_pdf_agent.worker.subprocess.run", fake_run)
+
+    folder = ask_ollama_for_folder("llama3.1", ["finance"], "# Invoice\nAmount due")
+
+    assert folder == "invoices"
+
+
 @pytest.mark.live_ollama
 def test_live_ollama_reuses_existing_folder_for_related_documents() -> None:
     model = discover_ollama_model("llama3.1")

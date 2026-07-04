@@ -256,7 +256,7 @@ def ask_ollama_for_folder(model: str, existing_folders: Iterable[str], markdown_
 def choose_folder_from_ollama_response(response: str, existing_folders: Iterable[str]) -> str | None:
     existing = {sanitize_folder_name(folder) for folder in existing_folders}
     candidates = [sanitize_folder_name(part) for part in re.split(r"[/\\,;>|]+", response)]
-    candidates = [candidate for candidate in candidates if candidate]
+    candidates = [candidate for candidate in candidates if candidate and candidate not in ROUTING_RESERVED_FOLDERS]
     for candidate in candidates:
         if candidate in existing:
             return candidate
@@ -646,8 +646,12 @@ def agent_config_path(args: argparse.Namespace) -> Path:
 
 
 def load_monitored_roots(path: Path) -> list[Path]:
+    return load_agent_config(path)[0]
+
+
+def load_agent_config(path: Path) -> tuple[list[Path], str | None]:
     if not path.exists():
-        return []
+        return [], None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -656,12 +660,23 @@ def load_monitored_roots(path: Path) -> list[Path]:
     roots = data.get("roots", [])
     if not isinstance(roots, list):
         raise RuntimeError(f"invalid marker-pdf-agent config at {path}: roots must be a list")
-    return unique_roots(Path(root).expanduser().resolve() for root in roots if isinstance(root, str))
+    ollama_model = data.get("ollama_model")
+    if ollama_model is not None and not isinstance(ollama_model, str):
+        raise RuntimeError(f"invalid marker-pdf-agent config at {path}: ollama_model must be a string or null")
+    return unique_roots(Path(root).expanduser().resolve() for root in roots if isinstance(root, str)), ollama_model or None
 
 
 def save_monitored_roots(path: Path, roots: Iterable[Path]) -> None:
+    _existing_roots, ollama_model = load_agent_config(path)
+    save_agent_config(path, roots, ollama_model)
+
+
+def save_agent_config(path: Path, roots: Iterable[Path], ollama_model: str | None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"roots": [str(root) for root in unique_roots(root.resolve() for root in roots)]}
+    data = {
+        "roots": [str(root) for root in unique_roots(root.resolve() for root in roots)],
+        "ollama_model": ollama_model,
+    }
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
@@ -684,10 +699,14 @@ def build_config_for_root(args: argparse.Namespace, root: Path) -> WorkerConfig:
 
 def build_tray_configs(args: argparse.Namespace) -> tuple[Path, list[WorkerConfig]]:
     path = agent_config_path(args)
-    roots = load_monitored_roots(path)
+    roots, saved_ollama_model = load_agent_config(path)
     explicit_root = Path(args.root).expanduser().resolve()
     roots = unique_roots([explicit_root, *roots])
-    save_monitored_roots(path, roots)
+    if args.no_ollama:
+        args.ollama_model = None
+    elif args.ollama_model is None and saved_ollama_model:
+        args.ollama_model = saved_ollama_model
+    save_agent_config(path, roots, args.ollama_model)
     return path, [build_config_for_root(args, root) for root in roots]
 
 
