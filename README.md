@@ -132,17 +132,9 @@ venv/bin/python -m marker_pdf_agent.worker install-service \
 
 Service logs are written under the managed folder in `.marker-pdf-agent/service.log` and `.marker-pdf-agent/service.err.log`.
 
-## Tests
+## Development
 
-```sh
-venv/bin/python -m pytest
-```
-
-Run the live Ollama routing check explicitly when Ollama and `llama3.1` are installed:
-
-```sh
-venv/bin/python -m pytest -m live_ollama
-```
+Development, test, quality-check, and publishing notes are in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## License
 

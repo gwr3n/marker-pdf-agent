@@ -1,8 +1,8 @@
 [project]
 name = "marker-pdf-agent"
 version = "0.1.0"
-description = "Background worker that watches a folder, converts documents with marker-pdf, and routes markdown outputs."
-readme = "README.md"
+description = "Document conversion agent that watches folders, converts files with marker-pdf, and routes Markdown outputs."
+readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
@@ -17,6 +17,7 @@ classifiers = [
 	"Operating System :: MacOS",
 	"Operating System :: Microsoft :: Windows",
 	"Operating System :: POSIX :: Linux",
+	"Programming Language :: Python :: Implementation :: CPython",
 	"Programming Language :: Python :: 3",
 	"Programming Language :: Python :: 3.10",
 	"Programming Language :: Python :: 3.11",
@@ -30,9 +31,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/robertorossi/marker-pdf-agent"
-Repository = "https://github.com/robertorossi/marker-pdf-agent"
-Issues = "https://github.com/robertorossi/marker-pdf-agent/issues"
+Homepage = "https://github.com/gwr3n/marker-pdf-agent"
+Repository = "https://github.com/gwr3n/marker-pdf-agent"
+Issues = "https://github.com/gwr3n/marker-pdf-agent/issues"
 
 [project.optional-dependencies]
 gui = [
@@ -46,6 +47,7 @@ dev = [
 	"mypy>=1.0.0",
 	"pytest>=8.4.0",
 	"ruff>=0.8.0",
+	"twine>=6.0.0",
 ]
 
 [project.scripts]
