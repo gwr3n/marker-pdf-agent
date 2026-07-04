@@ -1,5 +1,16 @@
 # marker-pdf-agent
 
+[![CI](https://github.com/gwr3n/marker-pdf-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/gwr3n/marker-pdf-agent/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/marker-pdf-agent.svg)](https://pypi.org/project/marker-pdf-agent/)
+[![PyPI - Wheel](https://img.shields.io/pypi/wheel/marker-pdf-agent)](https://pypi.org/project/marker-pdf-agent/)
+[![GitHub last commit](https://img.shields.io/github/last-commit/gwr3n/marker-pdf-agent)](https://github.com/gwr3n/marker-pdf-agent/commits/main)
+[![Downloads](https://static.pepy.tech/badge/marker-pdf-agent)](https://pepy.tech/project/marker-pdf-agent)
+[![Python](https://img.shields.io/pypi/pyversions/marker-pdf-agent.svg)](https://pypi.org/project/marker-pdf-agent/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Code style: Black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Lint: Ruff](https://img.shields.io/badge/lint-ruff-46a2f1.svg)](https://docs.astral.sh/ruff/)
+[![Types: Mypy](https://img.shields.io/badge/types-mypy-blue.svg)](https://mypy-lang.org/)
+
 A small Python document-conversion agent for turning PDFs and other supported documents into Markdown with `marker-pdf`. It watches one or more managed folders, queues documents moved into each `incoming/` directory, processes them through a single conversion worker, and stores the original plus the converted Markdown or asset zip under `converted/<category>/`.
 
 The agent can run as a plain foreground worker, an optional tray/menu-bar app, or a user-level background service. Folder routing is local and deterministic by default, with optional Ollama-assisted category selection when explicitly enabled.
