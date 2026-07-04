@@ -143,3 +143,9 @@ Run the live Ollama routing check explicitly when Ollama and `llama3.1` are inst
 ```sh
 venv/bin/python -m pytest -m live_ollama
 ```
+
+## License
+
+This project is released under the MIT License. See [LICENSE](LICENSE).
+
+The tray icon is derived from the MIT-licensed `file-markdown` SVG from SVG Repo: <https://www.svgrepo.com/svg/332064/file-markdown>.

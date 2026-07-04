@@ -15,9 +15,9 @@ import tempfile
 import threading
 import time
 import zipfile
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
 
 DOCUMENT_EXTENSIONS = {
     ".pdf",
@@ -231,13 +231,16 @@ def list_ollama_models() -> list[str]:
     return models
 
 
-def ask_ollama_for_folder(model: str, existing_folders: Iterable[str], markdown_text: str) -> tuple[str | None, str | None]:
+def ask_ollama_for_folder(
+    model: str, existing_folders: Iterable[str], markdown_text: str
+) -> tuple[str | None, str | None]:
     existing_folder_names = sorted(existing_folders)
     folder_list = ", ".join(existing_folder_names) or "none"
     prompt = (
         "You route converted documents into concise folder names. "
         "Choose the best destination based on both the converted document content and the current subfolder structure. "
-        "Use an existing converted/ subfolder when it fits, or propose one new folder that fits naturally beside the current subfolders. "
+        "Use an existing converted/ subfolder when it fits, "
+        "or propose one new folder that fits naturally beside the current subfolders. "
         "Return only the folder name, no punctuation or explanation.\n\n"
         f"Current converted/ subfolders: {folder_list}\n\n"
         f"Document markdown excerpt:\n{markdown_text}"
@@ -310,7 +313,14 @@ def service_state_dir(root: Path) -> Path:
 
 
 def service_run_arguments(args: argparse.Namespace) -> list[str]:
-    command = [sys.executable, "-m", "marker_pdf_agent.worker", "run", "--root", str(Path(args.root).resolve())]
+    command = [
+        sys.executable,
+        "-m",
+        "marker_pdf_agent.worker",
+        "run",
+        "--root",
+        str(Path(args.root).resolve()),
+    ]
     command.extend(["--incoming", args.incoming])
     command.extend(["--converted", args.converted])
     command.extend(["--poll-interval", str(args.poll_interval)])
@@ -334,7 +344,11 @@ def install_service(args: argparse.Namespace) -> None:
     if system == "Linux":
         path = install_systemd_user_service(args)
         print(f"Installed systemd user service at {path}", flush=True)
-        print(f"Start it with: systemctl --user daemon-reload && systemctl --user enable --now {args.service_name}.service", flush=True)
+        start_command = f"systemctl --user daemon-reload && systemctl --user enable --now {args.service_name}.service"
+        print(
+            f"Start it with: {start_command}",
+            flush=True,
+        )
         return
     if system == "Windows":
         path = install_windows_service_instructions(args)
@@ -378,7 +392,10 @@ def service_status(args: argparse.Namespace) -> None:
         subprocess.run(["systemctl", "--user", "status", f"{args.service_name}.service"], check=False)
         return
     if system == "Windows":
-        print("Check the service manager you used to install the Windows service, such as NSSM or Services.msc.", flush=True)
+        print(
+            "Check the service manager you used to install the Windows service, such as NSSM or Services.msc.",
+            flush=True,
+        )
         return
     raise RuntimeError(f"unsupported platform for service status: {system}")
 
@@ -490,7 +507,7 @@ class SingletonLock:
         self.path = path
         self.handle: object | None = None
 
-    def __enter__(self) -> "SingletonLock":
+    def __enter__(self) -> SingletonLock:
         self.acquire()
         return self
 
@@ -509,7 +526,7 @@ class SingletonLock:
                     handle.write("0")
                     handle.flush()
                 handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
             else:
                 import fcntl
 
@@ -727,7 +744,10 @@ def load_agent_config(path: Path) -> tuple[list[Path], str | None]:
     ollama_model = data.get("ollama_model")
     if ollama_model is not None and not isinstance(ollama_model, str):
         raise RuntimeError(f"invalid marker-pdf-agent config at {path}: ollama_model must be a string or null")
-    return unique_roots(Path(root).expanduser().resolve() for root in roots if isinstance(root, str)), ollama_model or None
+    return (
+        unique_roots(Path(root).expanduser().resolve() for root in roots if isinstance(root, str)),
+        ollama_model or None,
+    )
 
 
 def save_monitored_roots(path: Path, roots: Iterable[Path]) -> None:
@@ -808,20 +828,32 @@ def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", default=os.getcwd(), help="Folder to manage. Defaults to the launch directory.")
     parser.add_argument("--config", help="Path to the persisted foreground GUI configuration file.")
     parser.add_argument("--incoming", default="incoming", help="Subfolder to watch for moved-in documents.")
-    parser.add_argument("--converted", default="converted", help="Subfolder where routed markdown artifacts are placed.")
+    parser.add_argument(
+        "--converted", default="converted", help="Subfolder where routed markdown artifacts are placed."
+    )
     parser.add_argument("--poll-interval", type=float, default=2.0, help="Seconds between scans.")
-    parser.add_argument("--stable-seconds", type=float, default=1.0, help="Seconds a file must remain unchanged before queuing.")
+    parser.add_argument(
+        "--stable-seconds", type=float, default=1.0, help="Seconds a file must remain unchanged before queuing."
+    )
     parser.add_argument("--marker-command", default="marker_single", help="marker-pdf CLI executable to run.")
-    parser.add_argument("--marker-timeout", type=float, default=1800.0, help="Maximum seconds to allow one marker-pdf conversion.")
+    parser.add_argument(
+        "--marker-timeout", type=float, default=1800.0, help="Maximum seconds to allow one marker-pdf conversion."
+    )
     parser.add_argument("--ollama-model", help="Enable Ollama folder routing with this model.")
-    parser.add_argument("--no-ollama", action="store_true", help="Disable Ollama folder routing. This is the default unless --ollama-model is set.")
+    parser.add_argument(
+        "--no-ollama",
+        action="store_true",
+        help="Disable Ollama folder routing. This is the default unless --ollama-model is set.",
+    )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = list(sys.argv[1:] if argv is None else argv)
     commands = {"run", "tray", "install-service", "uninstall-service", "status"}
     if not args or args[0] not in commands:
-        parser = argparse.ArgumentParser(description="Convert newly dropped documents with marker-pdf in a background queue.")
+        parser = argparse.ArgumentParser(
+            description="Convert newly dropped documents with marker-pdf in a background queue."
+        )
         add_worker_arguments(parser)
         parser.add_argument("--tray", action="store_true", help="Run with the optional foreground status-bar GUI.")
         parsed = parser.parse_args(args)
@@ -829,7 +861,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parsed.service_name = DEFAULT_SERVICE_NAME
         return parsed
 
-    parser = argparse.ArgumentParser(description="Convert newly dropped documents with marker-pdf in a background queue.")
+    parser = argparse.ArgumentParser(
+        description="Convert newly dropped documents with marker-pdf in a background queue."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     run_parser = subparsers.add_parser("run", help="Run the foreground worker.")
     add_worker_arguments(run_parser)
@@ -840,13 +874,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     add_worker_arguments(tray_parser)
     tray_parser.set_defaults(service_name=DEFAULT_SERVICE_NAME, tray=True)
 
-    install_parser = subparsers.add_parser("install-service", help="Install a platform-specific background service definition.")
+    install_parser = subparsers.add_parser(
+        "install-service", help="Install a platform-specific background service definition."
+    )
     add_worker_arguments(install_parser)
-    install_parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME, help="Service name or label to install.")
+    install_parser.add_argument(
+        "--service-name", default=DEFAULT_SERVICE_NAME, help="Service name or label to install."
+    )
 
-    uninstall_parser = subparsers.add_parser("uninstall-service", help="Remove the platform-specific service definition.")
-    uninstall_parser.add_argument("--root", default=os.getcwd(), help="Folder managed by the service. Used for Windows instruction cleanup.")
-    uninstall_parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME, help="Service name or label to remove.")
+    uninstall_parser = subparsers.add_parser(
+        "uninstall-service", help="Remove the platform-specific service definition."
+    )
+    uninstall_parser.add_argument(
+        "--root", default=os.getcwd(), help="Folder managed by the service. Used for Windows instruction cleanup."
+    )
+    uninstall_parser.add_argument(
+        "--service-name", default=DEFAULT_SERVICE_NAME, help="Service name or label to remove."
+    )
 
     status_parser = subparsers.add_parser("status", help="Show status for the platform-specific service backend.")
     status_parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME, help="Service name or label to inspect.")

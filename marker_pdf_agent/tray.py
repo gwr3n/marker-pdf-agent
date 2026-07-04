@@ -154,7 +154,9 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
         for root_path in status.roots:
             root_menu = roots_menu.addMenu(str(root_path))
             root_menu.addAction("Open incoming", lambda checked=False, path=root_path: open_path(path / args.incoming))
-            root_menu.addAction("Open converted", lambda checked=False, path=root_path: open_path(path / args.converted))
+            root_menu.addAction(
+                "Open converted", lambda checked=False, path=root_path: open_path(path / args.converted)
+            )
             root_menu.addAction("Remove", lambda checked=False, path=root_path: remove_folder(path))
         roots_menu.addSeparator()
         roots_menu.addAction("Add folder", add_folder)
@@ -195,9 +197,11 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
     menu = QMenu()
     tray.setContextMenu(menu)
     tray.activated.connect(
-        lambda reason: refresh_menu()
-        if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.Context}
-        else None
+        lambda reason: (
+            refresh_menu()
+            if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.Context}
+            else None
+        )
     )
     refresh_menu()
     tray.show()

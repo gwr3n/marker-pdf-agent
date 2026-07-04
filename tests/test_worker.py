@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import subprocess
 from argparse import Namespace
 from pathlib import Path
 from subprocess import CompletedProcess
-import subprocess
 
 import pytest
 
 from marker_pdf_agent.worker import (
     ConversionJob,
     MarkerPdfWorker,
+    SingletonLock,
     WorkerConfig,
     WorkerManager,
     ask_ollama_for_folder,
@@ -23,12 +24,11 @@ from marker_pdf_agent.worker import (
     load_monitored_roots,
     parse_args,
     run_tray,
+    sanitize_folder_name,
     save_agent_config,
     save_monitored_roots,
     service_label,
     service_run_arguments,
-    SingletonLock,
-    sanitize_folder_name,
     singleton_lock_path,
     unique_path,
 )
@@ -319,7 +319,10 @@ def test_worker_manager_updates_ollama_model_for_all_roots(tmp_path: Path) -> No
 
     manager.set_ollama_model("llama3.1:latest")
 
-    assert [worker.config.ollama_model for worker in manager.worker_snapshot()] == ["llama3.1:latest", "llama3.1:latest"]
+    assert [worker.config.ollama_model for worker in manager.worker_snapshot()] == [
+        "llama3.1:latest",
+        "llama3.1:latest",
+    ]
     assert all(worker.config.use_ollama for worker in manager.worker_snapshot())
 
     manager.set_ollama_model(None)
@@ -412,9 +415,7 @@ def test_related_documents_create_expected_final_folder_structure(monkeypatch, t
         worker._process_document(source)
 
     actual_tree = sorted(
-        str(path.relative_to(config.converted_dir))
-        for path in config.converted_dir.rglob("*")
-        if path.is_file()
+        str(path.relative_to(config.converted_dir)) for path in config.converted_dir.rglob("*") if path.is_file()
     )
     expected_tree = sorted(
         file_name
@@ -430,11 +431,10 @@ def test_related_documents_create_expected_final_folder_structure(monkeypatch, t
 
 
 def test_ollama_prompt_uses_document_content_and_converted_structure(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, list[str]] = {}
 
     def fake_run(command: list[str], **kwargs: object) -> CompletedProcess[str]:
         captured["command"] = command
-        captured["kwargs"] = kwargs
         return CompletedProcess(command, 0, stdout="tax-records\n", stderr="")
 
     monkeypatch.setattr("marker_pdf_agent.worker.subprocess.run", fake_run)
@@ -500,17 +500,20 @@ def test_live_ollama_reuses_existing_folder_for_related_documents() -> None:
     model = next((name for name in ("llama3.1:latest", "llama3.1") if name in installed_models), None)
     if model is None:
         pytest.skip("Ollama with llama3.1 is not available")
+    assert model is not None
 
     existing_folders = ["tufte-documentation", "invoices", "legal"]
     latex_folder, latex_error = ask_ollama_for_folder(
         model,
         existing_folders,
-        "# Tufte LaTeX Documentation\nThis document explains Tufte-style handouts, books, sidenotes, and margin figures.",
+        "# Tufte LaTeX Documentation\n"
+        "This document explains Tufte-style handouts, books, sidenotes, and margin figures.",
     )
     markdown_folder, markdown_error = ask_ollama_for_folder(
         model,
         existing_folders,
-        "# Tufte R Markdown Styles\nThis guide describes R Markdown formats for Tufte-style documents, margin notes, and handouts.",
+        "# Tufte R Markdown Styles\n"
+        "This guide describes R Markdown formats for Tufte-style documents, margin notes, and handouts.",
     )
 
     assert latex_folder == "tufte-documentation"
@@ -563,10 +566,17 @@ def test_build_config_uses_explicit_ollama_model(tmp_path: Path) -> None:
 
 
 def test_list_ollama_models_parses_ollama_list(monkeypatch) -> None:
-    output = "NAME              ID              SIZE      MODIFIED\nllama3.1:latest   abc123          4.9 GB    today\nmistral:latest    def456          4.1 GB    today\n"
+    output = (
+        "NAME              ID              SIZE      MODIFIED\n"
+        "llama3.1:latest   abc123          4.9 GB    today\n"
+        "mistral:latest    def456          4.1 GB    today\n"
+    )
 
     monkeypatch.setattr("marker_pdf_agent.worker.shutil.which", lambda command: "/usr/bin/ollama")
-    monkeypatch.setattr("marker_pdf_agent.worker.subprocess.run", lambda command, **kwargs: CompletedProcess(command, 0, stdout=output, stderr=""))
+    monkeypatch.setattr(
+        "marker_pdf_agent.worker.subprocess.run",
+        lambda command, **kwargs: CompletedProcess(command, 0, stdout=output, stderr=""),
+    )
 
     assert list_ollama_models() == ["llama3.1:latest", "mistral:latest"]
 
@@ -702,10 +712,8 @@ def test_service_label_adds_launchd_domain_when_needed() -> None:
 def test_singleton_lock_rejects_second_running_agent(tmp_path: Path) -> None:
     lock_path = tmp_path / "agent.lock"
 
-    with SingletonLock(lock_path):
-        with pytest.raises(RuntimeError, match="already running"):
-            with SingletonLock(lock_path):
-                pass
+    with SingletonLock(lock_path), pytest.raises(RuntimeError, match="already running"), SingletonLock(lock_path):
+        pass
 
     with SingletonLock(lock_path):
         assert lock_path.exists()
@@ -719,7 +727,10 @@ def test_singleton_lock_path_is_user_level(monkeypatch, tmp_path: Path) -> None:
 
 def test_sanitize_folder_name_is_filesystem_friendly() -> None:
     assert sanitize_folder_name("  Tax & Legal / 2026!! ") == "tax-legal-2026"
-    assert sanitize_folder_name("tufte-latex-documentation/tufte-r-markdown-styles") == "tufte-latex-documentation-tufte-r-markdown-styles"
+    assert (
+        sanitize_folder_name("tufte-latex-documentation/tufte-r-markdown-styles")
+        == "tufte-latex-documentation-tufte-r-markdown-styles"
+    )
 
 
 def test_unique_path_adds_suffix_when_file_exists(tmp_path: Path) -> None:
