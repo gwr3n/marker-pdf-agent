@@ -28,6 +28,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["marker_pdf_agent*"]
 
+[tool.setuptools.package-data]
+marker_pdf_agent = ["assets/*.svg"]
+
 [tool.pytest.ini_options]
 markers = [
 	"live_ollama: tests that call the local Ollama CLI and require an installed model",

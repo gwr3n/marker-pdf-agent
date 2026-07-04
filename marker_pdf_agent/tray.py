@@ -6,6 +6,7 @@ import platform
 import subprocess
 import sys
 import threading
+from importlib import resources
 from pathlib import Path
 
 from marker_pdf_agent.worker import WorkerManager, WorkerStatus, build_config_for_root, save_monitored_roots
@@ -14,7 +15,7 @@ from marker_pdf_agent.worker import WorkerManager, WorkerStatus, build_config_fo
 def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: Path) -> None:
     hide_macos_dock_icon()
     try:
-        from PySide6.QtCore import Qt
+        from PySide6.QtCore import QObject, Qt, Signal
         from PySide6.QtGui import QIcon, QPainter, QPixmap
         from PySide6.QtWidgets import (
             QApplication,
@@ -26,7 +27,16 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
     except ImportError as exc:
         raise RuntimeError('install GUI dependencies with: venv/bin/python -m pip install ".[gui]"') from exc
 
+    class StatusBridge(QObject):
+        status_changed = Signal(object)
+
     def make_icon() -> QIcon:
+        icon_path = resources.files("marker_pdf_agent").joinpath("assets/file-markdown.svg")
+        with resources.as_file(icon_path) as path:
+            icon = QIcon(str(path))
+        if not icon.isNull():
+            return icon
+
         pixmap = QPixmap(32, 32)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
@@ -75,29 +85,40 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
             QMessageBox.information(None, "Cannot remove folder", "At least one folder must stay monitored.")
 
     status_action = None
+    document_action = None
     queue_action = None
 
-    def format_status(status: WorkerStatus) -> tuple[str, str]:
-        current = status.current_document or "Idle"
-        root = f" in {status.current_root}" if status.current_root else ""
-        state = "Stopping" if status.stopping else "Running"
-        return f"{state}: {current}{root}", f"Queue: {status.queue_size}"
+    def format_status(status: WorkerStatus) -> tuple[str, str | None, str]:
+        if status.stopping:
+            state = "Stopping"
+        elif status.current_document:
+            state = "Converting"
+        else:
+            state = "Idle"
+        document = f"Document: {status.current_document}" if status.current_document else None
+        return state, document, f"Queue: {status.queue_size}"
 
     def update_status(status: WorkerStatus) -> None:
         if status_action is None or queue_action is None:
             return
-        status_text, queue_text = format_status(status)
+        status_text, document_text, queue_text = format_status(status)
         status_action.setText(status_text)
+        if document_action is not None:
+            document_action.setText(document_text or "")
+            document_action.setVisible(document_text is not None)
         queue_action.setText(queue_text)
 
     def refresh_menu() -> None:
-        nonlocal status_action, queue_action
+        nonlocal status_action, document_action, queue_action
         status = manager.status()
-        status_text, queue_text = format_status(status)
+        status_text, document_text, queue_text = format_status(status)
 
         menu.clear()
         status_action = menu.addAction(status_text)
         status_action.setEnabled(False)
+        document_action = menu.addAction(document_text or "")
+        document_action.setEnabled(False)
+        document_action.setVisible(document_text is not None)
         queue_action = menu.addAction(queue_text)
         queue_action.setEnabled(False)
         menu.addSeparator()
@@ -116,6 +137,8 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
     hide_macos_dock_icon()
+    bridge = StatusBridge()
+    bridge.status_changed.connect(update_status, Qt.ConnectionType.QueuedConnection)
 
     icon = make_icon()
     tray = QSystemTrayIcon(icon)
@@ -130,7 +153,7 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
     )
     refresh_menu()
     tray.show()
-    manager.add_status_listener(update_status)
+    manager.add_status_listener(lambda status: bridge.status_changed.emit(status))
 
     worker_thread = threading.Thread(target=manager.run, name="marker-tray-worker", daemon=True)
     worker_thread.start()
