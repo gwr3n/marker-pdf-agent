@@ -16,9 +16,12 @@ from marker_pdf_agent.worker import (
     install_launchd_service,
     install_systemd_user_service,
     install_windows_service_instructions,
+    list_ollama_models,
+    load_agent_config,
     load_monitored_roots,
     parse_args,
     run_tray,
+    save_agent_config,
     save_monitored_roots,
     service_label,
     service_run_arguments,
@@ -269,6 +272,22 @@ def test_worker_manager_adds_and_removes_roots(tmp_path: Path) -> None:
     assert manager.status().roots == (first_config.root,)
 
 
+def test_worker_manager_updates_ollama_model_for_all_roots(tmp_path: Path) -> None:
+    first_config = make_config(tmp_path / "first")
+    second_config = make_config(tmp_path / "second")
+    manager = WorkerManager([first_config, second_config])
+
+    manager.set_ollama_model("llama3.1:latest")
+
+    assert [worker.config.ollama_model for worker in manager.worker_snapshot()] == ["llama3.1:latest", "llama3.1:latest"]
+    assert all(worker.config.use_ollama for worker in manager.worker_snapshot())
+
+    manager.set_ollama_model(None)
+
+    assert [worker.config.ollama_model for worker in manager.worker_snapshot()] == [None, None]
+    assert not any(worker.config.use_ollama for worker in manager.worker_snapshot())
+
+
 def test_run_marker_times_out_and_terminates_process(monkeypatch, tmp_path: Path) -> None:
     config = WorkerConfig(**{**make_config(tmp_path).__dict__, "marker_timeout": 0.01})
     worker = MarkerPdfWorker(config)
@@ -485,6 +504,15 @@ def test_build_config_uses_explicit_ollama_model(tmp_path: Path) -> None:
     assert config.use_ollama is True
 
 
+def test_list_ollama_models_parses_ollama_list(monkeypatch) -> None:
+    output = "NAME              ID              SIZE      MODIFIED\nllama3.1:latest   abc123          4.9 GB    today\nmistral:latest    def456          4.1 GB    today\n"
+
+    monkeypatch.setattr("marker_pdf_agent.worker.shutil.which", lambda command: "/usr/bin/ollama")
+    monkeypatch.setattr("marker_pdf_agent.worker.subprocess.run", lambda command, **kwargs: CompletedProcess(command, 0, stdout=output, stderr=""))
+
+    assert list_ollama_models() == ["llama3.1:latest", "mistral:latest"]
+
+
 def test_parse_args_keeps_legacy_run_mode(tmp_path: Path) -> None:
     args = parse_args(["--root", str(tmp_path), "--no-ollama"])
 
@@ -514,19 +542,30 @@ def test_save_and_load_monitored_roots_deduplicates(tmp_path: Path) -> None:
     assert '"roots"' in config_path.read_text(encoding="utf-8")
 
 
+def test_save_and_load_agent_config_includes_ollama_model(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    root = tmp_path / "root"
+
+    save_agent_config(config_path, [root], "llama3.1:latest")
+
+    roots, ollama_model = load_agent_config(config_path)
+    assert roots == [root.resolve()]
+    assert ollama_model == "llama3.1:latest"
+
+
 def test_build_tray_configs_persists_explicit_and_saved_roots(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("marker_pdf_agent.worker.discover_ollama_model", lambda preferred: None)
     config_path = tmp_path / "config.json"
     first = tmp_path / "first"
     second = tmp_path / "second"
-    save_monitored_roots(config_path, [second])
-    args = parse_args(["tray", "--root", str(first), "--config", str(config_path), "--no-ollama"])
+    save_agent_config(config_path, [second], "llama3.1:latest")
+    args = parse_args(["tray", "--root", str(first), "--config", str(config_path)])
 
     path, configs = build_tray_configs(args)
 
     assert path == config_path.resolve()
     assert [config.root for config in configs] == [first.resolve(), second.resolve()]
     assert load_monitored_roots(config_path) == [first.resolve(), second.resolve()]
+    assert [config.ollama_model for config in configs] == ["llama3.1:latest", "llama3.1:latest"]
 
 
 def test_run_tray_reports_missing_gui_dependency(monkeypatch, tmp_path: Path) -> None:

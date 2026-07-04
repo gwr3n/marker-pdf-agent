@@ -47,6 +47,8 @@ venv/bin/python -m marker_pdf_agent.worker run --tray --root /path/to/folder
 
 Click the status-bar icon to open the menu. The menu refreshes when opened and shows the active document, queue length, and monitored folders. It also has controls to open a folder's `incoming/` or `converted/` directory, add or remove monitored folders, and quit the foreground worker cleanly.
 
+Use the `Ollama routing` submenu to choose `Disabled` or one of the installed Ollama models. Choose `Refresh models` to query `ollama list`; the app does not query Ollama just from opening the tray menu. The selected model is persisted with the tray config and applies to all monitored folders.
+
 Monitored folders are persisted in `~/.marker-pdf-agent/config.json` by default. Use `--config /path/to/config.json` to choose a different config file. The `--root` folder passed at launch is added to that file automatically, and folders added or removed from the GUI update the same file.
 
 Multiple monitored folders share one conversion queue and one converter loop. Files from any monitored `incoming/` folder may be queued, but only one `marker-pdf` subprocess runs at a time.

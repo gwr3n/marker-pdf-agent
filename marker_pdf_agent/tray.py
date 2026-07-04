@@ -9,7 +9,13 @@ import threading
 from importlib import resources
 from pathlib import Path
 
-from marker_pdf_agent.worker import WorkerManager, WorkerStatus, build_config_for_root, save_monitored_roots
+from marker_pdf_agent.worker import (
+    WorkerManager,
+    WorkerStatus,
+    build_config_for_root,
+    list_ollama_models,
+    save_agent_config,
+)
 
 
 def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: Path) -> None:
@@ -72,17 +78,39 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
         root = Path(folder).resolve()
         config = build_config_for_root(args, root)
         if manager.add_config(config):
-            save_monitored_roots(config_path, manager.roots())
+            save_current_config()
             refresh_menu()
         else:
             QMessageBox.information(None, "Already monitored", f"{root} is already monitored.")
 
     def remove_folder(root: Path) -> None:
         if manager.remove_root(root):
-            save_monitored_roots(config_path, manager.roots())
+            save_current_config()
             refresh_menu()
         else:
             QMessageBox.information(None, "Cannot remove folder", "At least one folder must stay monitored.")
+
+    available_ollama_models: list[str] = []
+    selected_ollama_model = args.ollama_model
+
+    def save_current_config() -> None:
+        save_agent_config(config_path, manager.roots(), selected_ollama_model)
+
+    def select_ollama_model(model: str | None) -> None:
+        nonlocal selected_ollama_model
+        selected_ollama_model = model
+        args.ollama_model = model
+        args.no_ollama = model is None
+        manager.set_ollama_model(model)
+        save_current_config()
+        refresh_menu()
+
+    def refresh_ollama_models() -> None:
+        nonlocal available_ollama_models
+        available_ollama_models = list_ollama_models()
+        if selected_ollama_model and selected_ollama_model not in available_ollama_models:
+            available_ollama_models = [selected_ollama_model, *available_ollama_models]
+        refresh_menu()
 
     status_action = None
     document_action = None
@@ -131,6 +159,26 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
             root_menu.addAction("Remove", lambda checked=False, path=root_path: remove_folder(path))
         roots_menu.addSeparator()
         roots_menu.addAction("Add folder", add_folder)
+
+        ollama_menu = menu.addMenu("Ollama routing")
+        disabled_action = ollama_menu.addAction("Disabled")
+        disabled_action.setCheckable(True)
+        disabled_action.setChecked(selected_ollama_model is None)
+        disabled_action.triggered.connect(lambda _checked=False: select_ollama_model(None))
+        if available_ollama_models:
+            ollama_menu.addSeparator()
+            for model in available_ollama_models:
+                model_action = ollama_menu.addAction(model)
+                model_action.setCheckable(True)
+                model_action.setChecked(model == selected_ollama_model)
+                model_action.triggered.connect(lambda _checked=False, name=model: select_ollama_model(name))
+        elif selected_ollama_model:
+            selected_action = ollama_menu.addAction(selected_ollama_model)
+            selected_action.setCheckable(True)
+            selected_action.setChecked(True)
+            selected_action.triggered.connect(lambda _checked=False: select_ollama_model(selected_ollama_model))
+        ollama_menu.addSeparator()
+        ollama_menu.addAction("Refresh models", refresh_ollama_models)
         menu.addSeparator()
         menu.addAction("Quit", quit_app)
 

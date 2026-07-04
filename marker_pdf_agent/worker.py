@@ -227,6 +227,22 @@ def discover_ollama_model(preferred: str | None) -> str | None:
     return None
 
 
+def list_ollama_models() -> list[str]:
+    if shutil.which("ollama") is None:
+        return []
+    try:
+        result = subprocess.run(["ollama", "list"], check=True, capture_output=True, text=True, timeout=15)
+    except subprocess.SubprocessError:
+        return []
+
+    models: list[str] = []
+    for line in result.stdout.splitlines()[1:]:
+        parts = line.split()
+        if parts:
+            models.append(parts[0])
+    return models
+
+
 def ask_ollama_for_folder(model: str, existing_folders: Iterable[str], markdown_text: str) -> str | None:
     existing_folder_names = sorted(existing_folders)
     folder_list = ", ".join(existing_folder_names) or "none"
@@ -612,7 +628,31 @@ class WorkerManager:
             removed = len(self.workers) != before
         if removed:
             self._notify_status()
-            return removed
+        return removed
+
+    def set_ollama_model(self, model: str | None) -> None:
+        with self._workers_lock:
+            self.workers = [
+                MarkerPdfWorker(
+                    WorkerConfig(
+                        root=worker.config.root,
+                        incoming_dir=worker.config.incoming_dir,
+                        processing_dir=worker.config.processing_dir,
+                        converted_dir=worker.config.converted_dir,
+                        failed_dir=worker.config.failed_dir,
+                        poll_interval=worker.config.poll_interval,
+                        stable_seconds=worker.config.stable_seconds,
+                        marker_command=worker.config.marker_command,
+                        marker_timeout=worker.config.marker_timeout,
+                        ollama_model=model,
+                        use_ollama=model is not None,
+                    ),
+                    self.documents,
+                    self.stop_event,
+                )
+                for worker in self.workers
+            ]
+        self._notify_status()
 
     def roots(self) -> list[Path]:
         return [worker.config.root for worker in self.worker_snapshot()]
