@@ -86,6 +86,7 @@ class MarkerPdfWorker:
             if self._is_stable(path):
                 self.seen.add(path)
                 self.documents.put(path)
+                self._progress(f"Queued {path.name}")
 
     def _is_stable(self, path: Path) -> bool:
         try:
@@ -113,22 +114,30 @@ class MarkerPdfWorker:
                 self.documents.task_done()
 
     def _process_document(self, source: Path) -> None:
+        self._progress(f"Processing {source.name}")
         processing_source = self._move_to_processing(source)
         with tempfile.TemporaryDirectory(prefix="marker-output-") as temp_name:
             output_dir = Path(temp_name)
+            self._progress(f"Converting {source.name} with {self.config.marker_command}")
             self._run_marker(processing_source, output_dir)
             markdown_files = sorted(output_dir.rglob("*.md"))
             if not markdown_files:
                 raise RuntimeError("marker-pdf did not produce a markdown file")
 
             primary_markdown = markdown_files[0]
+            self._progress(f"Routing {source.name}")
             destination_folder = self._choose_destination(primary_markdown)
             destination_folder.mkdir(parents=True, exist_ok=True)
+            self._progress(f"Packaging {source.name}")
             artifact = self._pack_or_select_artifact(output_dir, primary_markdown, processing_source.stem)
             destination = unique_path(destination_folder / artifact.name)
             shutil.move(str(artifact), destination)
-            processing_source.unlink(missing_ok=True)
-            print(f"Converted {source.name} -> {destination.relative_to(self.config.root)}", flush=True)
+            original_destination = unique_path(destination_folder / processing_source.name)
+            shutil.move(str(processing_source), original_destination)
+            self._progress(f"Converted {source.name} -> {destination.relative_to(self.config.root)}")
+
+    def _progress(self, message: str) -> None:
+        print(message, flush=True)
 
     def _move_to_processing(self, source: Path) -> Path:
         destination = unique_path(self.config.processing_dir / source.name)
@@ -197,12 +206,14 @@ def discover_ollama_model(preferred: str | None) -> str | None:
 
 
 def ask_ollama_for_folder(model: str, existing_folders: Iterable[str], markdown_text: str) -> str | None:
-    folder_list = ", ".join(sorted(existing_folders)) or "none"
+    existing_folder_names = sorted(existing_folders)
+    folder_list = ", ".join(existing_folder_names) or "none"
     prompt = (
         "You route converted documents into concise folder names. "
-        "Use an existing folder when it fits, or propose one new folder. "
+        "Choose the best destination based on both the converted document content and the current subfolder structure. "
+        "Use an existing converted/ subfolder when it fits, or propose one new folder that fits naturally beside the current subfolders. "
         "Return only the folder name, no punctuation or explanation.\n\n"
-        f"Existing folders: {folder_list}\n\n"
+        f"Current converted/ subfolders: {folder_list}\n\n"
         f"Document markdown excerpt:\n{markdown_text}"
     )
     try:
@@ -217,11 +228,22 @@ def ask_ollama_for_folder(model: str, existing_folders: Iterable[str], markdown_
         return None
 
     first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-    return sanitize_folder_name(first_line) if first_line else None
+    return choose_folder_from_ollama_response(first_line, existing_folder_names) if first_line else None
+
+
+def choose_folder_from_ollama_response(response: str, existing_folders: Iterable[str]) -> str | None:
+    existing = {sanitize_folder_name(folder) for folder in existing_folders}
+    candidates = [sanitize_folder_name(part) for part in re.split(r"[/\\,;>|]+", response)]
+    candidates = [candidate for candidate in candidates if candidate]
+    for candidate in candidates:
+        if candidate in existing:
+            return candidate
+    return candidates[0] if candidates else None
 
 
 def sanitize_folder_name(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "", value).strip().strip(".")
+    cleaned = re.sub(r"[/\\]+", " ", value)
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", " ", cleaned).strip().strip(".")
     cleaned = re.sub(r"\s+", "-", cleaned).lower()
     return cleaned[:80] or "uncategorized"
 

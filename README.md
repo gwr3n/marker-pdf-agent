@@ -25,9 +25,9 @@ By default the worker creates and uses these folders:
 - `incoming/` - move documents here for conversion
 - `.marker-pdf-agent/processing/` - temporary in-progress files
 - `.marker-pdf-agent/failed/` - source files that failed conversion
-- `converted/<category>/` - final Markdown or zip artifacts
+- `converted/<category>/` - original documents plus final Markdown or zip artifacts
 
-If conversion produces only Markdown, the final artifact is a `.md` file. If marker emits images or other assets, the final artifact is a `.zip` containing the Markdown plus assets.
+If conversion produces only Markdown, the final artifact is a `.md` file. If marker emits images or other assets, the final artifact is a `.zip` containing the Markdown plus assets. The original document is moved into the same category folder as the converted artifact.
 
 ## Options
 
@@ -53,4 +53,10 @@ Useful flags:
 
 ```sh
 venv/bin/python -m pytest
+```
+
+Run the live Ollama routing check explicitly when Ollama and `llama3.1` are installed:
+
+```sh
+venv/bin/python -m pytest -m live_ollama
 ```
