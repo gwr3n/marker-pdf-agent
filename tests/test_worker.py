@@ -132,6 +132,26 @@ def test_process_document_keeps_original_with_converted_artifact(monkeypatch, tm
     assert not source.exists()
 
 
+def test_process_document_moves_processing_source_to_failed_on_conversion_error(monkeypatch, tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    worker = MarkerPdfWorker(config)
+    worker._ensure_dirs()
+    source = config.incoming_dir / "source.pdf"
+    source.write_bytes(b"original pdf")
+
+    def fake_run_marker(_source: Path, _output_dir: Path) -> None:
+        raise RuntimeError("marker-pdf failed with exit code 2")
+
+    monkeypatch.setattr(worker, "_run_marker", fake_run_marker)
+
+    with pytest.raises(RuntimeError, match="marker-pdf failed"):
+        worker._process_document(source)
+
+    assert (config.failed_dir / "source.pdf").read_bytes() == b"original pdf"
+    assert not source.exists()
+    assert not (config.processing_dir / "source.pdf").exists()
+
+
 def test_related_documents_create_expected_final_folder_structure(monkeypatch, tmp_path: Path) -> None:
     config = make_config(tmp_path, use_ollama=True, ollama_model="llama3.1")
     worker = MarkerPdfWorker(config)

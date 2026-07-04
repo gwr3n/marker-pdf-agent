@@ -116,25 +116,29 @@ class MarkerPdfWorker:
     def _process_document(self, source: Path) -> None:
         self._progress(f"Processing {source.name}")
         processing_source = self._move_to_processing(source)
-        with tempfile.TemporaryDirectory(prefix="marker-output-") as temp_name:
-            output_dir = Path(temp_name)
-            self._progress(f"Converting {source.name} with {self.config.marker_command}")
-            self._run_marker(processing_source, output_dir)
-            markdown_files = sorted(output_dir.rglob("*.md"))
-            if not markdown_files:
-                raise RuntimeError("marker-pdf did not produce a markdown file")
+        try:
+            with tempfile.TemporaryDirectory(prefix="marker-output-") as temp_name:
+                output_dir = Path(temp_name)
+                self._progress(f"Converting {source.name} with {self.config.marker_command}")
+                self._run_marker(processing_source, output_dir)
+                markdown_files = sorted(output_dir.rglob("*.md"))
+                if not markdown_files:
+                    raise RuntimeError("marker-pdf did not produce a markdown file")
 
-            primary_markdown = markdown_files[0]
-            self._progress(f"Routing {source.name}")
-            destination_folder = self._choose_destination(primary_markdown)
-            destination_folder.mkdir(parents=True, exist_ok=True)
-            self._progress(f"Packaging {source.name}")
-            artifact = self._pack_or_select_artifact(output_dir, primary_markdown, processing_source.stem)
-            destination = unique_path(destination_folder / artifact.name)
-            shutil.move(str(artifact), destination)
-            original_destination = unique_path(destination_folder / processing_source.name)
-            shutil.move(str(processing_source), original_destination)
-            self._progress(f"Converted {source.name} -> {destination.relative_to(self.config.root)}")
+                primary_markdown = markdown_files[0]
+                self._progress(f"Routing {source.name}")
+                destination_folder = self._choose_destination(primary_markdown)
+                destination_folder.mkdir(parents=True, exist_ok=True)
+                self._progress(f"Packaging {source.name}")
+                artifact = self._pack_or_select_artifact(output_dir, primary_markdown, processing_source.stem)
+                destination = unique_path(destination_folder / artifact.name)
+                shutil.move(str(artifact), destination)
+                original_destination = unique_path(destination_folder / processing_source.name)
+                shutil.move(str(processing_source), original_destination)
+                self._progress(f"Converted {source.name} -> {destination.relative_to(self.config.root)}")
+        except Exception:
+            self._move_to_failed(processing_source)
+            raise
 
     def _progress(self, message: str) -> None:
         print(message, flush=True)
