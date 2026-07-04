@@ -1,0 +1,2 @@
+marker-pdf>=1.8.0
+pytest>=8.4.0
