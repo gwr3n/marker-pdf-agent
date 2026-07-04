@@ -25,6 +25,7 @@ def make_config(tmp_path: Path, *, use_ollama: bool = False, ollama_model: str |
         poll_interval=0.01,
         stable_seconds=0,
         marker_command="marker_single",
+        marker_timeout=1800.0,
         ollama_model=ollama_model,
         use_ollama=use_ollama,
     )
@@ -150,6 +151,76 @@ def test_process_document_moves_processing_source_to_failed_on_conversion_error(
     assert (config.failed_dir / "source.pdf").read_bytes() == b"original pdf"
     assert not source.exists()
     assert not (config.processing_dir / "source.pdf").exists()
+
+
+def test_ensure_dirs_moves_orphaned_processing_files_to_failed(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    processing_file = config.processing_dir / "orphan.pdf"
+    processing_file.parent.mkdir(parents=True)
+    processing_file.write_bytes(b"partial conversion")
+
+    MarkerPdfWorker(config)._ensure_dirs()
+
+    assert (config.failed_dir / "orphan.pdf").read_bytes() == b"partial conversion"
+    assert not processing_file.exists()
+
+
+def test_convert_loop_allows_same_filename_retry_after_failure(monkeypatch, tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    worker = MarkerPdfWorker(config)
+    source = config.incoming_dir / "source.pdf"
+    worker.seen.add(source)
+    worker.documents.put(source)
+
+    def fake_process_document(_source: Path) -> None:
+        worker.stop_event.set()
+        raise RuntimeError("conversion failed")
+
+    monkeypatch.setattr(worker, "_process_document", fake_process_document)
+
+    worker._convert_loop()
+
+    assert source not in worker.seen
+    assert worker.documents.unfinished_tasks == 0
+
+
+def test_run_marker_times_out_and_terminates_process(monkeypatch, tmp_path: Path) -> None:
+    config = WorkerConfig(**{**make_config(tmp_path).__dict__, "marker_timeout": 0.01})
+    worker = MarkerPdfWorker(config)
+    process = FakeProcess(returncode_after_polls=None)
+
+    monkeypatch.setattr("marker_pdf_agent.worker.subprocess.Popen", lambda _command: process)
+    monkeypatch.setattr("marker_pdf_agent.worker.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        worker._run_marker(tmp_path / "source.pdf", tmp_path / "output")
+
+    assert process.terminated
+
+
+def test_run_marker_interrupts_process_when_worker_stops(monkeypatch, tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    worker = MarkerPdfWorker(config)
+    worker.stop_event.set()
+    process = FakeProcess(returncode_after_polls=None)
+
+    monkeypatch.setattr("marker_pdf_agent.worker.subprocess.Popen", lambda _command: process)
+
+    with pytest.raises(RuntimeError, match="interrupted by shutdown"):
+        worker._run_marker(tmp_path / "source.pdf", tmp_path / "output")
+
+    assert process.terminated
+
+
+def test_run_marker_raises_on_nonzero_exit(monkeypatch, tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    worker = MarkerPdfWorker(config)
+    process = FakeProcess(returncode_after_polls=0, final_returncode=2)
+
+    monkeypatch.setattr("marker_pdf_agent.worker.subprocess.Popen", lambda _command: process)
+
+    with pytest.raises(RuntimeError, match="exit code 2"):
+        worker._run_marker(tmp_path / "source.pdf", tmp_path / "output")
 
 
 def test_related_documents_create_expected_final_folder_structure(monkeypatch, tmp_path: Path) -> None:
@@ -285,6 +356,7 @@ def test_build_config_defaults_to_launch_directory_and_detected_ollama(monkeypat
         poll_interval=2.0,
         stable_seconds=1.0,
         marker_command="marker_single",
+        marker_timeout=900.0,
         ollama_model=None,
         no_ollama=False,
     )
@@ -294,6 +366,7 @@ def test_build_config_defaults_to_launch_directory_and_detected_ollama(monkeypat
     assert config.root == tmp_path
     assert config.incoming_dir == tmp_path / "incoming"
     assert config.converted_dir == tmp_path / "converted"
+    assert config.marker_timeout == 900.0
     assert config.ollama_model == "llama3.1"
 
 
@@ -307,3 +380,30 @@ def test_unique_path_adds_suffix_when_file_exists(tmp_path: Path) -> None:
     existing.write_text("old", encoding="utf-8")
 
     assert unique_path(existing) == tmp_path / "document-1.md"
+
+
+class FakeProcess:
+    def __init__(self, *, returncode_after_polls: int | None, final_returncode: int = 0) -> None:
+        self.returncode_after_polls = returncode_after_polls
+        self.final_returncode = final_returncode
+        self.poll_count = 0
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+
+    def poll(self) -> int | None:
+        self.poll_count += 1
+        if self.returncode_after_polls is not None and self.poll_count > self.returncode_after_polls:
+            self.returncode = self.final_returncode
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode or 0

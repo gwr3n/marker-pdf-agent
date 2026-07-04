@@ -29,6 +29,8 @@ By default the worker creates and uses these folders:
 
 If conversion produces only Markdown, the final artifact is a `.md` file. If marker emits images or other assets, the final artifact is a `.zip` containing the Markdown plus assets. The original document is moved into the same category folder as the converted artifact.
 
+If a conversion fails, times out, or is interrupted during shutdown, the source document is moved to `.marker-pdf-agent/failed/`. If the worker starts and finds leftover files in `.marker-pdf-agent/processing/` from a previous interrupted run, it moves them to `.marker-pdf-agent/failed/` so they are visible for manual retry.
+
 ## Options
 
 ```sh
@@ -37,6 +39,7 @@ venv/bin/python -m marker_pdf_agent.worker \
   --incoming incoming \
   --converted converted \
   --marker-command marker_single \
+  --marker-timeout 1800 \
   --ollama-model llama3.1
 ```
 
@@ -46,6 +49,7 @@ Useful flags:
 - `--incoming`: choose the watched subfolder
 - `--converted`: choose the output subfolder
 - `--marker-command`: choose the `marker-pdf` executable, defaults to `marker_single`
+- `--marker-timeout`: maximum seconds to allow one conversion before moving it to failed, defaults to 1800
 - `--ollama-model`: force a specific installed Ollama model
 - `--no-ollama`: disable AI folder routing
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import queue
 import re
@@ -45,6 +44,7 @@ class WorkerConfig:
     poll_interval: float
     stable_seconds: float
     marker_command: str
+    marker_timeout: float
     ollama_model: str | None
     use_ollama: bool
 
@@ -58,7 +58,7 @@ class MarkerPdfWorker:
 
     def run(self) -> None:
         self._ensure_dirs()
-        worker = threading.Thread(target=self._convert_loop, name="marker-converter", daemon=True)
+        worker = threading.Thread(target=self._convert_loop, name="marker-converter")
         worker.start()
         print(f"Watching {self.config.incoming_dir} for documents. Press Ctrl+C to stop.", flush=True)
 
@@ -68,7 +68,7 @@ class MarkerPdfWorker:
                 time.sleep(self.config.poll_interval)
         finally:
             self.stop_event.set()
-            worker.join(timeout=5)
+            worker.join()
 
     def _ensure_dirs(self) -> None:
         for directory in (
@@ -78,6 +78,9 @@ class MarkerPdfWorker:
             self.config.failed_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+        for path in sorted(self.config.processing_dir.iterdir()):
+            if path.is_file():
+                self._move_to_failed(path)
 
     def _scan_once(self) -> None:
         for path in sorted(self.config.incoming_dir.iterdir()):
@@ -111,6 +114,7 @@ class MarkerPdfWorker:
                 print(f"Failed to process {source.name}: {exc}", flush=True)
                 self._move_to_failed(source)
             finally:
+                self.seen.discard(source)
                 self.documents.task_done()
 
     def _process_document(self, source: Path) -> None:
@@ -156,11 +160,22 @@ class MarkerPdfWorker:
     def _run_marker(self, source: Path, output_dir: Path) -> None:
         command = [self.config.marker_command, str(source), "--output_dir", str(output_dir)]
         try:
-            subprocess.run(command, check=True)
+            process = subprocess.Popen(command)
         except FileNotFoundError as exc:
             raise RuntimeError(f"marker command not found: {self.config.marker_command}") from exc
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(f"marker-pdf failed with exit code {exc.returncode}") from exc
+
+        deadline = time.monotonic() + self.config.marker_timeout
+        while process.poll() is None:
+            if self.stop_event.is_set():
+                terminate_process(process)
+                raise RuntimeError("marker-pdf interrupted by shutdown")
+            if time.monotonic() >= deadline:
+                terminate_process(process)
+                raise RuntimeError(f"marker-pdf timed out after {self.config.marker_timeout:g} seconds")
+            time.sleep(0.5)
+
+        if process.returncode != 0:
+            raise RuntimeError(f"marker-pdf failed with exit code {process.returncode}")
 
     def _choose_destination(self, markdown_file: Path) -> Path:
         if not self.config.use_ollama or not self.config.ollama_model:
@@ -262,6 +277,15 @@ def unique_path(path: Path) -> Path:
     raise RuntimeError(f"could not find a unique name for {path}")
 
 
+def terminate_process(process: subprocess.Popen[bytes]) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def build_config(args: argparse.Namespace) -> WorkerConfig:
     root = Path(args.root).resolve()
     incoming_dir = (root / args.incoming).resolve()
@@ -278,6 +302,7 @@ def build_config(args: argparse.Namespace) -> WorkerConfig:
         poll_interval=args.poll_interval,
         stable_seconds=args.stable_seconds,
         marker_command=args.marker_command,
+        marker_timeout=args.marker_timeout,
         ollama_model=ollama_model,
         use_ollama=not args.no_ollama,
     )
@@ -291,6 +316,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-interval", type=float, default=2.0, help="Seconds between scans.")
     parser.add_argument("--stable-seconds", type=float, default=1.0, help="Seconds a file must remain unchanged before queuing.")
     parser.add_argument("--marker-command", default="marker_single", help="marker-pdf CLI executable to run.")
+    parser.add_argument("--marker-timeout", type=float, default=1800.0, help="Maximum seconds to allow one marker-pdf conversion.")
     parser.add_argument("--ollama-model", help="Specific Ollama model to use for folder routing.")
     parser.add_argument("--no-ollama", action="store_true", help="Disable Ollama folder routing.")
     return parser.parse_args()
