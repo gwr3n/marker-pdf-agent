@@ -1,6 +1,7 @@
 from argparse import Namespace
 from pathlib import Path
 from subprocess import CompletedProcess
+import subprocess
 
 import pytest
 
@@ -12,7 +13,6 @@ from marker_pdf_agent.worker import (
     ask_ollama_for_folder,
     build_config,
     build_tray_configs,
-    discover_ollama_model,
     install_launchd_service,
     install_systemd_user_service,
     install_windows_service_instructions,
@@ -96,11 +96,11 @@ def test_choose_destination_uses_ollama_folder(monkeypatch, tmp_path: Path) -> N
     markdown_file = tmp_path / "document.md"
     markdown_file.write_text("# Invoice\nTotal due next week", encoding="utf-8")
 
-    def fake_ollama(model: str, existing_folders: list[str], markdown_text: str) -> str:
+    def fake_ollama(model: str, existing_folders: list[str], markdown_text: str) -> tuple[str, None]:
         assert model == "llama3.1"
         assert existing_folders == ["finance"]
         assert "Invoice" in markdown_text
-        return "Finance"
+        return "Finance", None
 
     monkeypatch.setattr("marker_pdf_agent.worker.ask_ollama_for_folder", fake_ollama)
     worker = MarkerPdfWorker(config)
@@ -114,7 +114,7 @@ def test_choose_destination_rejects_reserved_ollama_folder(monkeypatch, tmp_path
     markdown_file = tmp_path / "document.md"
     markdown_file.write_text("# Notes\n", encoding="utf-8")
 
-    monkeypatch.setattr("marker_pdf_agent.worker.ask_ollama_for_folder", lambda *_args: "converted")
+    monkeypatch.setattr("marker_pdf_agent.worker.ask_ollama_for_folder", lambda *_args: ("converted", None))
     worker = MarkerPdfWorker(config)
 
     assert worker._choose_destination(markdown_file) == tmp_path / "converted" / "uncategorized"
@@ -200,7 +200,7 @@ def test_convert_loop_allows_same_filename_retry_after_failure(monkeypatch, tmp_
     worker = manager.workers[0]
     source = config.incoming_dir / "source.pdf"
     worker.seen.add(source)
-    manager.documents.put(ConversionJob(source, config))
+    manager.documents.put(ConversionJob(source, config.root))
 
     def fake_process_document(_self: MarkerPdfWorker, _source: Path) -> None:
         manager.stop_event.set()
@@ -220,8 +220,8 @@ def test_worker_manager_processes_multiple_roots_through_one_queue(monkeypatch, 
     first_source = first_config.incoming_dir / "first.pdf"
     second_source = second_config.incoming_dir / "second.pdf"
     manager = WorkerManager([first_config, second_config])
-    manager.documents.put(ConversionJob(first_source, first_config))
-    manager.documents.put(ConversionJob(second_source, second_config))
+    manager.documents.put(ConversionJob(first_source, first_config.root))
+    manager.documents.put(ConversionJob(second_source, second_config.root))
     started: list[str] = []
     finished: list[str] = []
 
@@ -245,7 +245,7 @@ def test_worker_manager_notifies_status_when_job_changes(monkeypatch, tmp_path: 
     config = make_config(tmp_path)
     source = config.incoming_dir / "source.pdf"
     manager = WorkerManager([config])
-    manager.documents.put(ConversionJob(source, config))
+    manager.documents.put(ConversionJob(source, config.root))
     statuses: list[str | None] = []
     manager.add_status_listener(lambda status: statuses.append(status.current_document))
 
@@ -257,6 +257,44 @@ def test_worker_manager_notifies_status_when_job_changes(monkeypatch, tmp_path: 
     manager._convert_loop()
 
     assert statuses == ["source.pdf", None]
+
+
+def test_worker_manager_uses_current_config_for_queued_job(monkeypatch, tmp_path: Path) -> None:
+    config = make_config(tmp_path, use_ollama=False)
+    manager = WorkerManager([config])
+    source = config.incoming_dir / "source.pdf"
+    manager.documents.put(ConversionJob(source, config.root))
+    models: list[str | None] = []
+
+    def fake_process_document(self: MarkerPdfWorker, _source: Path) -> None:
+        models.append(self.config.ollama_model)
+        manager.stop_event.set()
+
+    monkeypatch.setattr(MarkerPdfWorker, "_process_document", fake_process_document)
+
+    manager.set_ollama_model("llama3.1:latest")
+    manager._convert_loop()
+
+    assert models == ["llama3.1:latest"]
+
+
+def test_worker_manager_skips_queued_job_after_root_removed(monkeypatch, tmp_path: Path) -> None:
+    first_config = make_config(tmp_path / "first")
+    second_config = make_config(tmp_path / "second")
+    manager = WorkerManager([first_config, second_config])
+    source = second_config.incoming_dir / "source.pdf"
+    manager.documents.put(ConversionJob(source, second_config.root))
+    processed: list[Path] = []
+
+    def fake_process_document(_self: MarkerPdfWorker, source_path: Path) -> None:
+        processed.append(source_path)
+
+    monkeypatch.setattr(MarkerPdfWorker, "_process_document", fake_process_document)
+
+    assert manager.remove_root(second_config.root) is True
+
+    assert processed == []
+    assert manager.documents.unfinished_tasks == 0
 
 
 def test_worker_manager_adds_and_removes_roots(tmp_path: Path) -> None:
@@ -354,16 +392,16 @@ def test_related_documents_create_expected_final_folder_structure(monkeypatch, t
     def fake_run_marker(source: Path, output_dir: Path) -> None:
         output_dir.joinpath(f"{source.stem}.md").write_text(documents[source.name], encoding="utf-8")
 
-    def fake_ollama(_model: str, existing_folders: list[str], markdown_text: str) -> str:
+    def fake_ollama(_model: str, existing_folders: list[str], markdown_text: str) -> tuple[str, None]:
         if "Tufte" in markdown_text:
-            return "tufte-documentation"
+            return "tufte-documentation", None
         if "Invoice" in markdown_text:
-            return "invoices"
+            return "invoices", None
         if "Lease" in markdown_text:
-            return "legal"
+            return "legal", None
         if "Resume" in markdown_text:
-            return "career"
-        return "uncategorized"
+            return "career", None
+        return "uncategorized", None
 
     monkeypatch.setattr(worker, "_run_marker", fake_run_marker)
     monkeypatch.setattr("marker_pdf_agent.worker.ask_ollama_for_folder", fake_ollama)
@@ -399,9 +437,10 @@ def test_ollama_prompt_uses_document_content_and_converted_structure(monkeypatch
 
     monkeypatch.setattr("marker_pdf_agent.worker.subprocess.run", fake_run)
 
-    folder = ask_ollama_for_folder("llama3.1", ["finance", "legal"], "# Tax return\nW-2 income")
+    folder, error = ask_ollama_for_folder("llama3.1", ["finance", "legal"], "# Tax return\nW-2 income")
 
     assert folder == "tax-records"
+    assert error is None
     prompt = captured["command"][3]
     assert "based on both the converted document content and the current subfolder structure" in prompt
     assert "Current converted/ subfolders: finance, legal" in prompt
@@ -419,13 +458,14 @@ def test_ollama_path_like_response_reuses_existing_top_level_folder(monkeypatch)
 
     monkeypatch.setattr("marker_pdf_agent.worker.subprocess.run", fake_run)
 
-    folder = ask_ollama_for_folder(
+    folder, error = ask_ollama_for_folder(
         "llama3.1",
         ["tufte-latex-documentation"],
         "# Tufte R Markdown Styles\nDocumentation for Tufte-style documents",
     )
 
     assert folder == "tufte-latex-documentation"
+    assert error is None
 
 
 def test_ollama_path_like_response_ignores_converted_prefix(monkeypatch) -> None:
@@ -434,31 +474,47 @@ def test_ollama_path_like_response_ignores_converted_prefix(monkeypatch) -> None
 
     monkeypatch.setattr("marker_pdf_agent.worker.subprocess.run", fake_run)
 
-    folder = ask_ollama_for_folder("llama3.1", ["finance"], "# Invoice\nAmount due")
+    folder, error = ask_ollama_for_folder("llama3.1", ["finance"], "# Invoice\nAmount due")
 
     assert folder == "invoices"
+    assert error is None
+
+
+def test_ollama_failure_returns_error_message(monkeypatch) -> None:
+    def fake_run(command: list[str], **_kwargs: object) -> CompletedProcess[str]:
+        raise subprocess.CalledProcessError(1, command, stderr="model not found")
+
+    monkeypatch.setattr("marker_pdf_agent.worker.subprocess.run", fake_run)
+
+    folder, error = ask_ollama_for_folder("missing", [], "# Document")
+
+    assert folder is None
+    assert error == "Ollama routing failed for model missing: model not found"
 
 
 @pytest.mark.live_ollama
 def test_live_ollama_reuses_existing_folder_for_related_documents() -> None:
-    model = discover_ollama_model("llama3.1")
+    installed_models = list_ollama_models()
+    model = next((name for name in ("llama3.1:latest", "llama3.1") if name in installed_models), None)
     if model is None:
         pytest.skip("Ollama with llama3.1 is not available")
 
     existing_folders = ["tufte-documentation", "invoices", "legal"]
-    latex_folder = ask_ollama_for_folder(
+    latex_folder, latex_error = ask_ollama_for_folder(
         model,
         existing_folders,
         "# Tufte LaTeX Documentation\nThis document explains Tufte-style handouts, books, sidenotes, and margin figures.",
     )
-    markdown_folder = ask_ollama_for_folder(
+    markdown_folder, markdown_error = ask_ollama_for_folder(
         model,
         existing_folders,
         "# Tufte R Markdown Styles\nThis guide describes R Markdown formats for Tufte-style documents, margin notes, and handouts.",
     )
 
     assert latex_folder == "tufte-documentation"
+    assert latex_error is None
     assert markdown_folder == "tufte-documentation"
+    assert markdown_error is None
 
 
 def test_build_config_defaults_to_launch_directory_without_ollama(monkeypatch, tmp_path: Path) -> None:

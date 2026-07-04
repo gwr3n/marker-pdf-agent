@@ -34,7 +34,6 @@ DOCUMENT_EXTENSIONS = {
     ".html",
     ".epub",
 }
-FAST_OLLAMA_MODELS = ("llama3.1", "llama3", "mistral", "phi3", "gemma2")
 SYSTEM_FOLDERS = {"incoming", "processing", "converted", "failed", ".marker-pdf-agent"}
 ROUTING_RESERVED_FOLDERS = SYSTEM_FOLDERS | {"uncategorized"}
 DEFAULT_SERVICE_NAME = "marker-pdf-agent"
@@ -59,7 +58,7 @@ class WorkerConfig:
 @dataclass(frozen=True)
 class ConversionJob:
     source: Path
-    config: WorkerConfig
+    root: Path
 
 
 @dataclass(frozen=True)
@@ -69,6 +68,7 @@ class WorkerStatus:
     current_document: str | None
     current_root: Path | None
     stopping: bool
+    last_message: str | None
 
 
 class MarkerPdfWorker:
@@ -77,10 +77,12 @@ class MarkerPdfWorker:
         config: WorkerConfig,
         documents: queue.Queue[ConversionJob] | None = None,
         stop_event: threading.Event | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
         self.documents: queue.Queue[ConversionJob] = documents or queue.Queue()
         self.stop_event = stop_event or threading.Event()
+        self.on_progress = on_progress
         self.seen: set[Path] = set()
 
     def run(self) -> None:
@@ -104,7 +106,7 @@ class MarkerPdfWorker:
                 continue
             if self._is_stable(path):
                 self.seen.add(path)
-                self.documents.put(ConversionJob(path, self.config))
+                self.documents.put(ConversionJob(path, self.config.root))
                 self._progress(f"Queued {path.name}")
 
     def _is_stable(self, path: Path) -> bool:
@@ -146,6 +148,8 @@ class MarkerPdfWorker:
 
     def _progress(self, message: str) -> None:
         print(message, flush=True)
+        if self.on_progress:
+            self.on_progress(message)
 
     def _move_to_processing(self, source: Path) -> Path:
         destination = unique_path(self.config.processing_dir / source.name)
@@ -187,7 +191,9 @@ class MarkerPdfWorker:
             if path.is_dir() and path.name not in SYSTEM_FOLDERS
         ]
         markdown_text = markdown_file.read_text(encoding="utf-8", errors="replace")[:6000]
-        folder_name = ask_ollama_for_folder(self.config.ollama_model, existing_folders, markdown_text)
+        folder_name, routing_error = ask_ollama_for_folder(self.config.ollama_model, existing_folders, markdown_text)
+        if routing_error:
+            self._progress(routing_error)
         if not folder_name:
             return self.config.converted_dir / "uncategorized"
         destination_name = sanitize_folder_name(folder_name)
@@ -209,24 +215,6 @@ class MarkerPdfWorker:
         return zip_path
 
 
-def discover_ollama_model(preferred: str | None) -> str | None:
-    if shutil.which("ollama") is None:
-        return None
-    if preferred:
-        return preferred
-
-    try:
-        result = subprocess.run(["ollama", "list"], check=True, capture_output=True, text=True)
-    except subprocess.SubprocessError:
-        return None
-
-    installed = result.stdout.lower()
-    for model in FAST_OLLAMA_MODELS:
-        if model in installed:
-            return model
-    return None
-
-
 def list_ollama_models() -> list[str]:
     if shutil.which("ollama") is None:
         return []
@@ -243,7 +231,7 @@ def list_ollama_models() -> list[str]:
     return models
 
 
-def ask_ollama_for_folder(model: str, existing_folders: Iterable[str], markdown_text: str) -> str | None:
+def ask_ollama_for_folder(model: str, existing_folders: Iterable[str], markdown_text: str) -> tuple[str | None, str | None]:
     existing_folder_names = sorted(existing_folders)
     folder_list = ", ".join(existing_folder_names) or "none"
     prompt = (
@@ -262,11 +250,18 @@ def ask_ollama_for_folder(model: str, existing_folders: Iterable[str], markdown_
             text=True,
             timeout=60,
         )
-    except subprocess.SubprocessError:
-        return None
+    except subprocess.TimeoutExpired:
+        return None, f"Ollama routing timed out for model {model}"
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.strip() if exc.stderr else f"exit code {exc.returncode}"
+        return None, f"Ollama routing failed for model {model}: {detail}"
+    except subprocess.SubprocessError as exc:
+        return None, f"Ollama routing failed for model {model}: {exc}"
 
     first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-    return choose_folder_from_ollama_response(first_line, existing_folder_names) if first_line else None
+    if not first_line:
+        return None, f"Ollama routing returned no folder for model {model}"
+    return choose_folder_from_ollama_response(first_line, existing_folder_names), None
 
 
 def choose_folder_from_ollama_response(response: str, existing_folders: Iterable[str]) -> str | None:
@@ -555,9 +550,17 @@ class WorkerManager:
         self.documents: queue.Queue[ConversionJob] = queue.Queue()
         self.stop_event = threading.Event()
         self.current_job: ConversionJob | None = None
+        self.last_message: str | None = None
         self._workers_lock = threading.Lock()
         self._status_listeners: list[Callable[[WorkerStatus], None]] = []
-        self.workers = [MarkerPdfWorker(config, self.documents, self.stop_event) for config in configs]
+        self.workers = [self._make_worker(config) for config in configs]
+
+    def _make_worker(self, config: WorkerConfig) -> MarkerPdfWorker:
+        return MarkerPdfWorker(config, self.documents, self.stop_event, self._record_progress)
+
+    def _record_progress(self, message: str) -> None:
+        self.last_message = message
+        self._notify_status()
 
     def run(self) -> None:
         for worker in self.worker_snapshot():
@@ -584,25 +587,30 @@ class WorkerManager:
             except queue.Empty:
                 continue
 
-            worker = self._worker_for(job.config)
+            worker = self._worker_for_root(job.root)
             self.current_job = job
             self._notify_status()
             try:
+                if worker is None:
+                    print(f"Skipped {job.source.name}: monitored folder was removed", flush=True)
+                    continue
                 worker._process_document(job.source)
             except Exception as exc:  # noqa: BLE001 - keep manager alive after per-file failures.
                 print(f"Failed to process {job.source.name}: {exc}", flush=True)
-                worker._move_to_failed(job.source)
+                if worker is not None:
+                    worker._move_to_failed(job.source)
             finally:
-                worker.seen.discard(job.source)
+                if worker is not None:
+                    worker.seen.discard(job.source)
                 self.current_job = None
                 self.documents.task_done()
                 self._notify_status()
 
-    def _worker_for(self, config: WorkerConfig) -> MarkerPdfWorker:
+    def _worker_for_root(self, root: Path) -> MarkerPdfWorker | None:
         for worker in self.worker_snapshot():
-            if worker.config == config:
+            if worker.config.root == root:
                 return worker
-        return MarkerPdfWorker(config, self.documents, self.stop_event)
+        return None
 
     def worker_snapshot(self) -> list[MarkerPdfWorker]:
         with self._workers_lock:
@@ -612,7 +620,7 @@ class WorkerManager:
         with self._workers_lock:
             if any(worker.config.root == config.root for worker in self.workers):
                 return False
-            worker = MarkerPdfWorker(config, self.documents, self.stop_event)
+            worker = self._make_worker(config)
             worker._ensure_dirs()
             self.workers.append(worker)
         self._notify_status()
@@ -627,8 +635,22 @@ class WorkerManager:
             self.workers = [worker for worker in self.workers if worker.config.root != resolved]
             removed = len(self.workers) != before
         if removed:
+            self._drop_queued_jobs_for_root(resolved)
             self._notify_status()
         return removed
+
+    def _drop_queued_jobs_for_root(self, root: Path) -> None:
+        kept: list[ConversionJob] = []
+        while True:
+            try:
+                job = self.documents.get_nowait()
+            except queue.Empty:
+                break
+            if job.root != root:
+                kept.append(job)
+            self.documents.task_done()
+        for job in kept:
+            self.documents.put(job)
 
     def set_ollama_model(self, model: str | None) -> None:
         with self._workers_lock:
@@ -649,6 +671,7 @@ class WorkerManager:
                     ),
                     self.documents,
                     self.stop_event,
+                    self._record_progress,
                 )
                 for worker in self.workers
             ]
@@ -663,8 +686,9 @@ class WorkerManager:
             roots=tuple(self.roots()),
             queue_size=self.documents.qsize(),
             current_document=current_job.source.name if current_job else None,
-            current_root=current_job.config.root if current_job else None,
+            current_root=current_job.root if current_job else None,
             stopping=self.stop_event.is_set(),
+            last_message=self.last_message,
         )
 
     def add_status_listener(self, listener: Callable[[WorkerStatus], None]) -> None:

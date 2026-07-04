@@ -35,6 +35,7 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
 
     class StatusBridge(QObject):
         status_changed = Signal(object)
+        models_changed = Signal(object)
 
     def make_icon() -> QIcon:
         icon_path = resources.files("marker_pdf_agent").joinpath("assets/file-markdown.svg")
@@ -106,47 +107,45 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
         refresh_menu()
 
     def refresh_ollama_models() -> None:
+        def load_models() -> None:
+            bridge.models_changed.emit(list_ollama_models())
+
+        threading.Thread(target=load_models, name="marker-ollama-models", daemon=True).start()
+
+    def update_ollama_models(models: list[str]) -> None:
         nonlocal available_ollama_models
-        available_ollama_models = list_ollama_models()
+        available_ollama_models = models
         if selected_ollama_model and selected_ollama_model not in available_ollama_models:
             available_ollama_models = [selected_ollama_model, *available_ollama_models]
         refresh_menu()
 
     status_action = None
-    document_action = None
     queue_action = None
 
-    def format_status(status: WorkerStatus) -> tuple[str, str | None, str]:
+    def format_status(status: WorkerStatus) -> tuple[str, str]:
         if status.stopping:
             state = "Stopping"
         elif status.current_document:
             state = "Converting"
         else:
             state = "Idle"
-        document = f"Document: {status.current_document}" if status.current_document else None
-        return state, document, f"Queue: {status.queue_size}"
+        return state, f"Queue: {status.queue_size}"
 
     def update_status(status: WorkerStatus) -> None:
         if status_action is None or queue_action is None:
             return
-        status_text, document_text, queue_text = format_status(status)
+        status_text, queue_text = format_status(status)
         status_action.setText(status_text)
-        if document_action is not None:
-            document_action.setText(document_text or "")
-            document_action.setVisible(document_text is not None)
         queue_action.setText(queue_text)
 
     def refresh_menu() -> None:
-        nonlocal status_action, document_action, queue_action
+        nonlocal status_action, queue_action
         status = manager.status()
-        status_text, document_text, queue_text = format_status(status)
+        status_text, queue_text = format_status(status)
 
         menu.clear()
         status_action = menu.addAction(status_text)
         status_action.setEnabled(False)
-        document_action = menu.addAction(document_text or "")
-        document_action.setEnabled(False)
-        document_action.setVisible(document_text is not None)
         queue_action = menu.addAction(queue_text)
         queue_action.setEnabled(False)
         menu.addSeparator()
@@ -187,6 +186,7 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
     hide_macos_dock_icon()
     bridge = StatusBridge()
     bridge.status_changed.connect(update_status, Qt.ConnectionType.QueuedConnection)
+    bridge.models_changed.connect(update_ollama_models, Qt.ConnectionType.QueuedConnection)
 
     icon = make_icon()
     tray = QSystemTrayIcon(icon)
