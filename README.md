@@ -16,7 +16,7 @@ Install the optional desktop GUI dependencies when you want the status-bar app:
 venv/bin/python -m pip install ".[gui]"
 ```
 
-`ollama` is optional. If the `ollama` CLI is present and a recent fast model such as `llama3.1`, `llama3`, `mistral`, `phi3`, or `gemma2` is installed, the worker uses it to choose the destination folder. Otherwise converted files go to `converted/uncategorized`.
+`ollama` is optional and is not started or queried unless you explicitly pass `--ollama-model`. Without that flag, converted files go to `converted/uncategorized`.
 
 ## Run
 
@@ -30,7 +30,7 @@ For compatibility, running without the `run` subcommand still starts the foregro
 
 ## Status-Bar GUI
 
-The status-bar GUI is for synchronous foreground runs, not installed daemon/service runs. It uses the same worker manager as the command-line foreground worker, displays the current queue and active document, and still allows only one `marker-pdf` conversion at a time.
+The status-bar GUI is for synchronous foreground runs, not installed daemon/service runs. It uses the same worker manager as the command-line foreground worker, displays the current queue and active document in the tray menu, and still allows only one `marker-pdf` conversion at a time. On macOS it runs as a menu-bar app rather than showing a Dock icon.
 
 Install the optional GUI extra before using this mode:
 
@@ -45,7 +45,7 @@ venv/bin/python -m marker_pdf_agent.worker tray --root /path/to/folder
 venv/bin/python -m marker_pdf_agent.worker run --tray --root /path/to/folder
 ```
 
-Click the status-bar icon to open the status window. The window shows the active document, queue length, and monitored folders. It also has controls to open a selected folder's `incoming/` or `converted/` directory, add a monitored folder, remove a monitored folder, and quit the foreground worker cleanly.
+Click the status-bar icon to open the menu. The menu refreshes when opened and shows the active document, queue length, and monitored folders. It also has controls to open a folder's `incoming/` or `converted/` directory, add or remove monitored folders, and quit the foreground worker cleanly.
 
 Monitored folders are persisted in `~/.marker-pdf-agent/config.json` by default. Use `--config /path/to/config.json` to choose a different config file. The `--root` folder passed at launch is added to that file automatically, and folders added or removed from the GUI update the same file.
 
@@ -82,8 +82,8 @@ Useful flags:
 - `--converted`: choose the output subfolder
 - `--marker-command`: choose the `marker-pdf` executable, defaults to `marker_single`
 - `--marker-timeout`: maximum seconds to allow one conversion before moving it to failed, defaults to 1800
-- `--ollama-model`: force a specific installed Ollama model
-- `--no-ollama`: disable AI folder routing
+- `--ollama-model`: enable AI folder routing with a specific installed Ollama model
+- `--no-ollama`: disable AI folder routing; this is the default unless `--ollama-model` is set
 
 ## Background Service
 

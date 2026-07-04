@@ -105,6 +105,18 @@ def test_choose_destination_uses_ollama_folder(monkeypatch, tmp_path: Path) -> N
     assert worker._choose_destination(markdown_file) == tmp_path / "converted" / "finance"
 
 
+def test_choose_destination_rejects_reserved_ollama_folder(monkeypatch, tmp_path: Path) -> None:
+    config = make_config(tmp_path, use_ollama=True, ollama_model="llama3.1")
+    config.converted_dir.mkdir()
+    markdown_file = tmp_path / "document.md"
+    markdown_file.write_text("# Notes\n", encoding="utf-8")
+
+    monkeypatch.setattr("marker_pdf_agent.worker.ask_ollama_for_folder", lambda *_args: "converted")
+    worker = MarkerPdfWorker(config)
+
+    assert worker._choose_destination(markdown_file) == tmp_path / "converted" / "uncategorized"
+
+
 def test_process_document_reports_progress(monkeypatch, capsys, tmp_path: Path) -> None:
     config = make_config(tmp_path)
     worker = MarkerPdfWorker(config)
@@ -224,6 +236,24 @@ def test_worker_manager_processes_multiple_roots_through_one_queue(monkeypatch, 
     assert started == ["first.pdf", "second.pdf"]
     assert finished == ["first.pdf", "second.pdf"]
     assert manager.documents.unfinished_tasks == 0
+
+
+def test_worker_manager_notifies_status_when_job_changes(monkeypatch, tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    source = config.incoming_dir / "source.pdf"
+    manager = WorkerManager([config])
+    manager.documents.put(ConversionJob(source, config))
+    statuses: list[str | None] = []
+    manager.add_status_listener(lambda status: statuses.append(status.current_document))
+
+    def fake_process_document(_self: MarkerPdfWorker, _source: Path) -> None:
+        manager.stop_event.set()
+
+    monkeypatch.setattr(MarkerPdfWorker, "_process_document", fake_process_document)
+
+    manager._convert_loop()
+
+    assert statuses == ["source.pdf", None]
 
 
 def test_worker_manager_adds_and_removes_roots(tmp_path: Path) -> None:
@@ -401,9 +431,8 @@ def test_live_ollama_reuses_existing_folder_for_related_documents() -> None:
     assert markdown_folder == "tufte-documentation"
 
 
-def test_build_config_defaults_to_launch_directory_and_detected_ollama(monkeypatch, tmp_path: Path) -> None:
+def test_build_config_defaults_to_launch_directory_without_ollama(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("marker_pdf_agent.worker.discover_ollama_model", lambda preferred: "llama3.1")
     args = Namespace(
         root=str(tmp_path),
         incoming="incoming",
@@ -422,7 +451,27 @@ def test_build_config_defaults_to_launch_directory_and_detected_ollama(monkeypat
     assert config.incoming_dir == tmp_path / "incoming"
     assert config.converted_dir == tmp_path / "converted"
     assert config.marker_timeout == 900.0
+    assert config.ollama_model is None
+    assert config.use_ollama is False
+
+
+def test_build_config_uses_explicit_ollama_model(tmp_path: Path) -> None:
+    args = Namespace(
+        root=str(tmp_path),
+        incoming="incoming",
+        converted="converted",
+        poll_interval=2.0,
+        stable_seconds=1.0,
+        marker_command="marker_single",
+        marker_timeout=900.0,
+        ollama_model="llama3.1",
+        no_ollama=False,
+    )
+
+    config = build_config(args)
+
     assert config.ollama_model == "llama3.1"
+    assert config.use_ollama is True
 
 
 def test_parse_args_keeps_legacy_run_mode(tmp_path: Path) -> None:

@@ -8,121 +8,23 @@ import sys
 import threading
 from pathlib import Path
 
-from marker_pdf_agent.worker import WorkerManager, build_config_for_root, save_monitored_roots
+from marker_pdf_agent.worker import WorkerManager, WorkerStatus, build_config_for_root, save_monitored_roots
 
 
 def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: Path) -> None:
+    hide_macos_dock_icon()
     try:
-        from PySide6.QtCore import Qt, QTimer
-        from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QIcon, QPainter, QPixmap
         from PySide6.QtWidgets import (
             QApplication,
             QFileDialog,
-            QHBoxLayout,
-            QLabel,
-            QListWidget,
-            QMainWindow,
             QMenu,
             QMessageBox,
-            QPushButton,
             QSystemTrayIcon,
-            QVBoxLayout,
-            QWidget,
         )
     except ImportError as exc:
         raise RuntimeError('install GUI dependencies with: venv/bin/python -m pip install ".[gui]"') from exc
-
-    class StatusWindow(QMainWindow):
-        def __init__(self) -> None:
-            super().__init__()
-            self.setWindowTitle("marker-pdf-agent")
-            self.resize(520, 360)
-
-            self.summary_label = QLabel()
-            self.summary_label.setWordWrap(True)
-            self.roots_list = QListWidget()
-            self.open_incoming_button = QPushButton("Open incoming")
-            self.open_converted_button = QPushButton("Open converted")
-            self.add_button = QPushButton("Add folder")
-            self.remove_button = QPushButton("Remove folder")
-            self.quit_button = QPushButton("Quit")
-
-            button_row = QHBoxLayout()
-            button_row.addWidget(self.open_incoming_button)
-            button_row.addWidget(self.open_converted_button)
-
-            manage_row = QHBoxLayout()
-            manage_row.addWidget(self.add_button)
-            manage_row.addWidget(self.remove_button)
-            manage_row.addStretch(1)
-            manage_row.addWidget(self.quit_button)
-
-            layout = QVBoxLayout()
-            layout.addWidget(self.summary_label)
-            layout.addWidget(QLabel("Monitored folders"))
-            layout.addWidget(self.roots_list)
-            layout.addLayout(button_row)
-            layout.addLayout(manage_row)
-
-            container = QWidget()
-            container.setLayout(layout)
-            self.setCentralWidget(container)
-
-            self.open_incoming_button.clicked.connect(lambda: self.open_selected("incoming"))
-            self.open_converted_button.clicked.connect(lambda: self.open_selected("converted"))
-            self.add_button.clicked.connect(self.add_folder)
-            self.remove_button.clicked.connect(self.remove_folder)
-            self.quit_button.clicked.connect(quit_app)
-
-        def refresh(self) -> None:
-            status = manager.status()
-            current = status.current_document or "Idle"
-            root = f" in {status.current_root}" if status.current_root else ""
-            stopping = "Stopping" if status.stopping else "Running"
-            self.summary_label.setText(f"{stopping}. Current: {current}{root}. Queue: {status.queue_size}.")
-
-            selected = self.selected_root()
-            self.roots_list.clear()
-            for root_path in status.roots:
-                self.roots_list.addItem(str(root_path))
-            if selected:
-                matches = self.roots_list.findItems(str(selected), Qt.MatchFlag.MatchExactly)
-                if matches:
-                    self.roots_list.setCurrentItem(matches[0])
-            elif self.roots_list.count():
-                self.roots_list.setCurrentRow(0)
-
-        def selected_root(self) -> Path | None:
-            item = self.roots_list.currentItem()
-            return Path(item.text()) if item else None
-
-        def open_selected(self, child: str) -> None:
-            root = self.selected_root()
-            if root is None:
-                return
-            open_path(root / child)
-
-        def add_folder(self) -> None:
-            folder = QFileDialog.getExistingDirectory(self, "Add monitored folder", str(Path.home()))
-            if not folder:
-                return
-            root = Path(folder).resolve()
-            config = build_config_for_root(args, root)
-            if manager.add_config(config):
-                save_monitored_roots(config_path, manager.roots())
-                self.refresh()
-            else:
-                QMessageBox.information(self, "Already monitored", f"{root} is already monitored.")
-
-        def remove_folder(self) -> None:
-            root = self.selected_root()
-            if root is None:
-                return
-            if manager.remove_root(root):
-                save_monitored_roots(config_path, manager.roots())
-                self.refresh()
-            else:
-                QMessageBox.information(self, "Cannot remove folder", "At least one folder must stay monitored.")
 
     def make_icon() -> QIcon:
         pixmap = QPixmap(32, 32)
@@ -153,38 +55,85 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
         manager.stop_event.set()
         app.quit()
 
+    def add_folder() -> None:
+        folder = QFileDialog.getExistingDirectory(None, "Add monitored folder", str(Path.home()))
+        if not folder:
+            return
+        root = Path(folder).resolve()
+        config = build_config_for_root(args, root)
+        if manager.add_config(config):
+            save_monitored_roots(config_path, manager.roots())
+            refresh_menu()
+        else:
+            QMessageBox.information(None, "Already monitored", f"{root} is already monitored.")
+
+    def remove_folder(root: Path) -> None:
+        if manager.remove_root(root):
+            save_monitored_roots(config_path, manager.roots())
+            refresh_menu()
+        else:
+            QMessageBox.information(None, "Cannot remove folder", "At least one folder must stay monitored.")
+
+    status_action = None
+    queue_action = None
+
+    def format_status(status: WorkerStatus) -> tuple[str, str]:
+        current = status.current_document or "Idle"
+        root = f" in {status.current_root}" if status.current_root else ""
+        state = "Stopping" if status.stopping else "Running"
+        return f"{state}: {current}{root}", f"Queue: {status.queue_size}"
+
+    def update_status(status: WorkerStatus) -> None:
+        if status_action is None or queue_action is None:
+            return
+        status_text, queue_text = format_status(status)
+        status_action.setText(status_text)
+        queue_action.setText(queue_text)
+
+    def refresh_menu() -> None:
+        nonlocal status_action, queue_action
+        status = manager.status()
+        status_text, queue_text = format_status(status)
+
+        menu.clear()
+        status_action = menu.addAction(status_text)
+        status_action.setEnabled(False)
+        queue_action = menu.addAction(queue_text)
+        queue_action.setEnabled(False)
+        menu.addSeparator()
+
+        roots_menu = menu.addMenu("Monitored folders")
+        for root_path in status.roots:
+            root_menu = roots_menu.addMenu(str(root_path))
+            root_menu.addAction("Open incoming", lambda checked=False, path=root_path: open_path(path / args.incoming))
+            root_menu.addAction("Open converted", lambda checked=False, path=root_path: open_path(path / args.converted))
+            root_menu.addAction("Remove", lambda checked=False, path=root_path: remove_folder(path))
+        roots_menu.addSeparator()
+        roots_menu.addAction("Add folder", add_folder)
+        menu.addSeparator()
+        menu.addAction("Quit", quit_app)
+
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setQuitOnLastWindowClosed(False)
+    hide_macos_dock_icon()
 
     icon = make_icon()
-    window = StatusWindow()
     tray = QSystemTrayIcon(icon)
     tray.setToolTip("marker-pdf-agent")
 
     menu = QMenu()
-    show_action = QAction("Show status")
-    quit_action = QAction("Quit")
-    show_action.triggered.connect(lambda: show_window())
-    quit_action.triggered.connect(quit_app)
-    menu.addAction(show_action)
-    menu.addSeparator()
-    menu.addAction(quit_action)
     tray.setContextMenu(menu)
+    tray.activated.connect(
+        lambda reason: refresh_menu()
+        if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.Context}
+        else None
+    )
+    refresh_menu()
     tray.show()
-
-    def show_window() -> None:
-        window.refresh()
-        window.show()
-        window.raise_()
-        window.activateWindow()
+    manager.add_status_listener(update_status)
 
     worker_thread = threading.Thread(target=manager.run, name="marker-tray-worker", daemon=True)
     worker_thread.start()
-
-    timer = QTimer()
-    timer.timeout.connect(window.refresh)
-    timer.start(1000)
-    window.refresh()
 
     exit_code = app.exec()
     manager.stop_event.set()
@@ -192,3 +141,14 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
     if worker_thread.is_alive():
         raise RuntimeError("worker did not stop within 10 seconds")
     raise SystemExit(exit_code)
+
+
+def hide_macos_dock_icon() -> None:
+    if platform.system() != "Darwin":
+        return
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+
+        NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    except ImportError:
+        return

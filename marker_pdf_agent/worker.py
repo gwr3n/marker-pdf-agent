@@ -17,7 +17,7 @@ import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 DOCUMENT_EXTENSIONS = {
     ".pdf",
@@ -36,6 +36,7 @@ DOCUMENT_EXTENSIONS = {
 }
 FAST_OLLAMA_MODELS = ("llama3.1", "llama3", "mistral", "phi3", "gemma2")
 SYSTEM_FOLDERS = {"incoming", "processing", "converted", "failed", ".marker-pdf-agent"}
+ROUTING_RESERVED_FOLDERS = SYSTEM_FOLDERS | {"uncategorized"}
 DEFAULT_SERVICE_NAME = "marker-pdf-agent"
 DEFAULT_CONFIG_NAME = "config.json"
 
@@ -189,7 +190,10 @@ class MarkerPdfWorker:
         folder_name = ask_ollama_for_folder(self.config.ollama_model, existing_folders, markdown_text)
         if not folder_name:
             return self.config.converted_dir / "uncategorized"
-        return self.config.converted_dir / sanitize_folder_name(folder_name)
+        destination_name = sanitize_folder_name(folder_name)
+        if destination_name in ROUTING_RESERVED_FOLDERS:
+            return self.config.converted_dir / "uncategorized"
+        return self.config.converted_dir / destination_name
 
     def _pack_or_select_artifact(self, output_dir: Path, markdown_file: Path, stem: str) -> Path:
         files = [path for path in output_dir.rglob("*") if path.is_file()]
@@ -536,6 +540,7 @@ class WorkerManager:
         self.stop_event = threading.Event()
         self.current_job: ConversionJob | None = None
         self._workers_lock = threading.Lock()
+        self._status_listeners: list[Callable[[WorkerStatus], None]] = []
         self.workers = [MarkerPdfWorker(config, self.documents, self.stop_event) for config in configs]
 
     def run(self) -> None:
@@ -565,6 +570,7 @@ class WorkerManager:
 
             worker = self._worker_for(job.config)
             self.current_job = job
+            self._notify_status()
             try:
                 worker._process_document(job.source)
             except Exception as exc:  # noqa: BLE001 - keep manager alive after per-file failures.
@@ -574,6 +580,7 @@ class WorkerManager:
                 worker.seen.discard(job.source)
                 self.current_job = None
                 self.documents.task_done()
+                self._notify_status()
 
     def _worker_for(self, config: WorkerConfig) -> MarkerPdfWorker:
         for worker in self.worker_snapshot():
@@ -592,7 +599,8 @@ class WorkerManager:
             worker = MarkerPdfWorker(config, self.documents, self.stop_event)
             worker._ensure_dirs()
             self.workers.append(worker)
-            return True
+        self._notify_status()
+        return True
 
     def remove_root(self, root: Path) -> bool:
         resolved = root.resolve()
@@ -601,7 +609,10 @@ class WorkerManager:
                 return False
             before = len(self.workers)
             self.workers = [worker for worker in self.workers if worker.config.root != resolved]
-            return len(self.workers) != before
+            removed = len(self.workers) != before
+        if removed:
+            self._notify_status()
+            return removed
 
     def roots(self) -> list[Path]:
         return [worker.config.root for worker in self.worker_snapshot()]
@@ -615,6 +626,14 @@ class WorkerManager:
             current_root=current_job.config.root if current_job else None,
             stopping=self.stop_event.is_set(),
         )
+
+    def add_status_listener(self, listener: Callable[[WorkerStatus], None]) -> None:
+        self._status_listeners.append(listener)
+
+    def _notify_status(self) -> None:
+        status = self.status()
+        for listener in list(self._status_listeners):
+            listener(status)
 
 
 def user_config_path() -> Path:
@@ -686,7 +705,7 @@ def build_config(args: argparse.Namespace) -> WorkerConfig:
     converted_dir = (root / args.converted).resolve()
     processing_dir = (root / ".marker-pdf-agent" / "processing").resolve()
     failed_dir = (root / ".marker-pdf-agent" / "failed").resolve()
-    ollama_model = discover_ollama_model(args.ollama_model) if not args.no_ollama else None
+    ollama_model = args.ollama_model if args.ollama_model and not args.no_ollama else None
     return WorkerConfig(
         root=root,
         incoming_dir=incoming_dir,
@@ -698,7 +717,7 @@ def build_config(args: argparse.Namespace) -> WorkerConfig:
         marker_command=args.marker_command,
         marker_timeout=args.marker_timeout,
         ollama_model=ollama_model,
-        use_ollama=not args.no_ollama,
+        use_ollama=ollama_model is not None,
     )
 
 
@@ -711,8 +730,8 @@ def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--stable-seconds", type=float, default=1.0, help="Seconds a file must remain unchanged before queuing.")
     parser.add_argument("--marker-command", default="marker_single", help="marker-pdf CLI executable to run.")
     parser.add_argument("--marker-timeout", type=float, default=1800.0, help="Maximum seconds to allow one marker-pdf conversion.")
-    parser.add_argument("--ollama-model", help="Specific Ollama model to use for folder routing.")
-    parser.add_argument("--no-ollama", action="store_true", help="Disable Ollama folder routing.")
+    parser.add_argument("--ollama-model", help="Enable Ollama folder routing with this model.")
+    parser.add_argument("--no-ollama", action="store_true", help="Disable Ollama folder routing. This is the default unless --ollama-model is set.")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
