@@ -10,7 +10,15 @@ from marker_pdf_agent.worker import (
     ask_ollama_for_folder,
     build_config,
     discover_ollama_model,
+    install_launchd_service,
+    install_systemd_user_service,
+    install_windows_service_instructions,
+    parse_args,
+    service_label,
+    service_run_arguments,
+    SingletonLock,
     sanitize_folder_name,
+    singleton_lock_path,
     unique_path,
 )
 
@@ -368,6 +376,93 @@ def test_build_config_defaults_to_launch_directory_and_detected_ollama(monkeypat
     assert config.converted_dir == tmp_path / "converted"
     assert config.marker_timeout == 900.0
     assert config.ollama_model == "llama3.1"
+
+
+def test_parse_args_keeps_legacy_run_mode(tmp_path: Path) -> None:
+    args = parse_args(["--root", str(tmp_path), "--no-ollama"])
+
+    assert args.command == "run"
+    assert args.root == str(tmp_path)
+    assert args.no_ollama is True
+
+
+def test_service_run_arguments_use_current_python_and_run_subcommand(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", "/example/python")
+    args = parse_args(["install-service", "--root", str(tmp_path), "--incoming", "dropbox", "--no-ollama"])
+
+    command = service_run_arguments(args)
+
+    assert command[:5] == ["/example/python", "-m", "marker_pdf_agent.worker", "run", "--root"]
+    assert str(tmp_path) in command
+    assert "--incoming" in command
+    assert "dropbox" in command
+    assert command[-1] == "--no-ollama"
+
+
+def test_install_launchd_service_writes_plist(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", "/example/python")
+    root = tmp_path / "managed"
+    args = parse_args(["install-service", "--root", str(root), "--service-name", "marker-pdf-agent"])
+
+    path = install_launchd_service(args)
+
+    assert path == tmp_path / "home" / "Library" / "LaunchAgents" / "local.marker-pdf-agent.plist"
+    text = path.read_text(encoding="utf-8")
+    assert "local.marker-pdf-agent" in text
+    assert str(root) in text
+    assert "/example/python" in text
+
+
+def test_install_systemd_user_service_writes_unit(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", "/example/python")
+    root = tmp_path / "managed folder"
+    args = parse_args(["install-service", "--root", str(root), "--marker-command", "marker single"])
+
+    path = install_systemd_user_service(args)
+
+    assert path == tmp_path / "home" / ".config" / "systemd" / "user" / "marker-pdf-agent.service"
+    content = path.read_text(encoding="utf-8")
+    assert "ExecStart=/example/python -m marker_pdf_agent.worker run --root" in content
+    assert "'marker single'" in content
+    assert "Restart=on-failure" in content
+
+
+def test_install_windows_service_instructions_write_service_host_values(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", "C:/Python/python.exe")
+    root = tmp_path / "managed"
+    args = parse_args(["install-service", "--root", str(root), "--service-name", "MarkerPdfAgent"])
+
+    path = install_windows_service_instructions(args)
+
+    content = path.read_text(encoding="utf-8")
+    assert "Service name: MarkerPdfAgent" in content
+    assert "Application: C:/Python/python.exe" in content
+    assert "Arguments: -m marker_pdf_agent.worker run --root" in content
+
+
+def test_service_label_adds_launchd_domain_when_needed() -> None:
+    assert service_label("marker-pdf-agent") == "local.marker-pdf-agent"
+    assert service_label("com.example.marker") == "com.example.marker"
+
+
+def test_singleton_lock_rejects_second_running_agent(tmp_path: Path) -> None:
+    lock_path = tmp_path / "agent.lock"
+
+    with SingletonLock(lock_path):
+        with pytest.raises(RuntimeError, match="already running"):
+            with SingletonLock(lock_path):
+                pass
+
+    with SingletonLock(lock_path):
+        assert lock_path.exists()
+
+
+def test_singleton_lock_path_is_user_level(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert singleton_lock_path() == tmp_path / ".marker-pdf-agent" / "agent.lock"
 
 
 def test_sanitize_folder_name_is_filesystem_friendly() -> None:

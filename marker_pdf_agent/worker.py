@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
+import plistlib
 import queue
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 DOCUMENT_EXTENSIONS = {
     ".pdf",
@@ -32,6 +35,7 @@ DOCUMENT_EXTENSIONS = {
 }
 FAST_OLLAMA_MODELS = ("llama3.1", "llama3", "mistral", "phi3", "gemma2")
 SYSTEM_FOLDERS = {"incoming", "processing", "converted", "failed", ".marker-pdf-agent"}
+DEFAULT_SERVICE_NAME = "marker-pdf-agent"
 
 
 @dataclass(frozen=True)
@@ -286,6 +290,249 @@ def terminate_process(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
+def service_label(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip(".-")
+    return cleaned if "." in cleaned else f"local.{cleaned or 'marker-pdf-agent'}"
+
+
+def service_state_dir(root: Path) -> Path:
+    return root / ".marker-pdf-agent"
+
+
+def service_run_arguments(args: argparse.Namespace) -> list[str]:
+    command = [sys.executable, "-m", "marker_pdf_agent.worker", "run", "--root", str(Path(args.root).resolve())]
+    command.extend(["--incoming", args.incoming])
+    command.extend(["--converted", args.converted])
+    command.extend(["--poll-interval", str(args.poll_interval)])
+    command.extend(["--stable-seconds", str(args.stable_seconds)])
+    command.extend(["--marker-command", args.marker_command])
+    command.extend(["--marker-timeout", str(args.marker_timeout)])
+    if args.ollama_model:
+        command.extend(["--ollama-model", args.ollama_model])
+    if args.no_ollama:
+        command.append("--no-ollama")
+    return command
+
+
+def install_service(args: argparse.Namespace) -> None:
+    system = platform.system()
+    if system == "Darwin":
+        path = install_launchd_service(args)
+        print(f"Installed macOS LaunchAgent at {path}", flush=True)
+        print(f"Start it with: launchctl bootstrap gui/$(id -u) {path}", flush=True)
+        return
+    if system == "Linux":
+        path = install_systemd_user_service(args)
+        print(f"Installed systemd user service at {path}", flush=True)
+        print(f"Start it with: systemctl --user daemon-reload && systemctl --user enable --now {args.service_name}.service", flush=True)
+        return
+    if system == "Windows":
+        path = install_windows_service_instructions(args)
+        print(f"Wrote Windows service setup instructions to {path}", flush=True)
+        return
+    raise RuntimeError(f"unsupported platform for service install: {system}")
+
+
+def uninstall_service(args: argparse.Namespace) -> None:
+    system = platform.system()
+    if system == "Darwin":
+        path = launchd_plist_path(args.service_name)
+        if path.exists():
+            path.unlink()
+        print(f"Removed macOS LaunchAgent definition at {path}", flush=True)
+        print(f"Unload a running service with: launchctl bootout gui/$(id -u) {path}", flush=True)
+        return
+    if system == "Linux":
+        path = systemd_user_service_path(args.service_name)
+        if path.exists():
+            path.unlink()
+        print(f"Removed systemd user service definition at {path}", flush=True)
+        print("Reload systemd with: systemctl --user daemon-reload", flush=True)
+        return
+    if system == "Windows":
+        path = windows_service_instruction_path(Path(args.root).resolve())
+        if path.exists():
+            path.unlink()
+        print(f"Removed Windows service setup instructions at {path}", flush=True)
+        return
+    raise RuntimeError(f"unsupported platform for service uninstall: {system}")
+
+
+def service_status(args: argparse.Namespace) -> None:
+    system = platform.system()
+    if system == "Darwin":
+        label = service_label(args.service_name)
+        subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], check=False)
+        return
+    if system == "Linux":
+        subprocess.run(["systemctl", "--user", "status", f"{args.service_name}.service"], check=False)
+        return
+    if system == "Windows":
+        print("Check the service manager you used to install the Windows service, such as NSSM or Services.msc.", flush=True)
+        return
+    raise RuntimeError(f"unsupported platform for service status: {system}")
+
+
+def install_launchd_service(args: argparse.Namespace) -> Path:
+    root = Path(args.root).resolve()
+    state_dir = service_state_dir(root)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    label = service_label(args.service_name)
+    path = launchd_plist_path(args.service_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plist = {
+        "Label": label,
+        "ProgramArguments": service_run_arguments(args),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "WorkingDirectory": str(root),
+        "StandardOutPath": str(state_dir / "service.log"),
+        "StandardErrorPath": str(state_dir / "service.err.log"),
+    }
+    with path.open("wb") as handle:
+        plistlib.dump(plist, handle, sort_keys=False)
+    return path
+
+
+def install_systemd_user_service(args: argparse.Namespace) -> Path:
+    root = Path(args.root).resolve()
+    state_dir = service_state_dir(root)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = systemd_user_service_path(args.service_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    command = " ".join(quote_systemd_argument(part) for part in service_run_arguments(args))
+    content = "\n".join(
+        [
+            "[Unit]",
+            "Description=marker-pdf-agent document conversion worker",
+            "After=default.target",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"WorkingDirectory={root}",
+            f"ExecStart={command}",
+            "Restart=on-failure",
+            "RestartSec=5",
+            f"StandardOutput=append:{state_dir / 'service.log'}",
+            f"StandardError=append:{state_dir / 'service.err.log'}",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ]
+    )
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def install_windows_service_instructions(args: argparse.Namespace) -> Path:
+    root = Path(args.root).resolve()
+    state_dir = service_state_dir(root)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    command = service_run_arguments(args)
+    path = windows_service_instruction_path(root)
+    path.write_text(
+        "\n".join(
+            [
+                "# marker-pdf-agent Windows service",
+                "",
+                "Python cannot install a native Windows service without an additional service host.",
+                "Use NSSM or a pywin32 service wrapper with these values:",
+                "",
+                f"Service name: {args.service_name}",
+                f"Application: {command[0]}",
+                f"Arguments: {' '.join(command[1:])}",
+                f"Startup directory: {root}",
+                f"Stdout log: {state_dir / 'service.log'}",
+                f"Stderr log: {state_dir / 'service.err.log'}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def launchd_plist_path(name: str) -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{service_label(name)}.plist"
+
+
+def systemd_user_service_path(name: str) -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / f"{name}.service"
+
+
+def windows_service_instruction_path(root: Path) -> Path:
+    return service_state_dir(root) / "windows-service.md"
+
+
+def quote_systemd_argument(value: str) -> str:
+    if not value or re.search(r"\s|[\\'\"]", value):
+        return "'" + value.replace("'", "'\\''") + "'"
+    return value
+
+
+def singleton_lock_path() -> Path:
+    return Path.home() / ".marker-pdf-agent" / "agent.lock"
+
+
+class SingletonLock:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.handle: object | None = None
+
+    def __enter__(self) -> "SingletonLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.release()
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                if not handle.read(1):
+                    handle.write("0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise RuntimeError(f"marker-pdf-agent is already running for this user; lock held at {self.path}") from exc
+
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+        self.handle = handle
+
+    def release(self) -> None:
+        if self.handle is None:
+            return
+        handle = self.handle
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)  # type: ignore[attr-defined]
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+        finally:
+            handle.close()  # type: ignore[attr-defined]
+            self.handle = None
+
+
 def build_config(args: argparse.Namespace) -> WorkerConfig:
     root = Path(args.root).resolve()
     incoming_dir = (root / args.incoming).resolve()
@@ -308,8 +555,7 @@ def build_config(args: argparse.Namespace) -> WorkerConfig:
     )
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Convert newly dropped documents with marker-pdf in a background queue.")
+def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", default=os.getcwd(), help="Folder to manage. Defaults to the launch directory.")
     parser.add_argument("--incoming", default="incoming", help="Subfolder to watch for moved-in documents.")
     parser.add_argument("--converted", default="converted", help="Subfolder where routed markdown artifacts are placed.")
@@ -319,20 +565,60 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--marker-timeout", type=float, default=1800.0, help="Maximum seconds to allow one marker-pdf conversion.")
     parser.add_argument("--ollama-model", help="Specific Ollama model to use for folder routing.")
     parser.add_argument("--no-ollama", action="store_true", help="Disable Ollama folder routing.")
-    return parser.parse_args()
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    args = list(sys.argv[1:] if argv is None else argv)
+    commands = {"run", "install-service", "uninstall-service", "status"}
+    if not args or args[0] not in commands:
+        parser = argparse.ArgumentParser(description="Convert newly dropped documents with marker-pdf in a background queue.")
+        add_worker_arguments(parser)
+        parsed = parser.parse_args(args)
+        parsed.command = "run"
+        parsed.service_name = DEFAULT_SERVICE_NAME
+        return parsed
+
+    parser = argparse.ArgumentParser(description="Convert newly dropped documents with marker-pdf in a background queue.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    run_parser = subparsers.add_parser("run", help="Run the foreground worker.")
+    add_worker_arguments(run_parser)
+    run_parser.set_defaults(service_name=DEFAULT_SERVICE_NAME)
+
+    install_parser = subparsers.add_parser("install-service", help="Install a platform-specific background service definition.")
+    add_worker_arguments(install_parser)
+    install_parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME, help="Service name or label to install.")
+
+    uninstall_parser = subparsers.add_parser("uninstall-service", help="Remove the platform-specific service definition.")
+    uninstall_parser.add_argument("--root", default=os.getcwd(), help="Folder managed by the service. Used for Windows instruction cleanup.")
+    uninstall_parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME, help="Service name or label to remove.")
+
+    status_parser = subparsers.add_parser("status", help="Show status for the platform-specific service backend.")
+    status_parser.add_argument("--service-name", default=DEFAULT_SERVICE_NAME, help="Service name or label to inspect.")
+    return parser.parse_args(args)
 
 
 def main() -> None:
     args = parse_args()
-    config = build_config(args)
-    worker = MarkerPdfWorker(config)
+    if args.command == "install-service":
+        install_service(args)
+        return
+    if args.command == "uninstall-service":
+        uninstall_service(args)
+        return
+    if args.command == "status":
+        service_status(args)
+        return
 
-    def stop(_signum: int, _frame: object) -> None:
-        worker.stop_event.set()
+    with SingletonLock(singleton_lock_path()):
+        config = build_config(args)
+        worker = MarkerPdfWorker(config)
 
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-    worker.run()
+        def stop(_signum: int, _frame: object) -> None:
+            worker.stop_event.set()
+
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
+        worker.run()
 
 
 if __name__ == "__main__":
