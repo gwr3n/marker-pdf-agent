@@ -1,6 +1,8 @@
 # marker-pdf-agent
 
-A small Python background worker that watches the folder where it is launched, queues newly moved-in documents, converts them to Markdown with `marker-pdf`, and places the converted artifact into a routed subfolder.
+A small Python document-conversion agent for turning PDFs and other supported documents into Markdown with `marker-pdf`. It watches one or more managed folders, queues documents moved into each `incoming/` directory, processes them through a single conversion worker, and stores the original plus the converted Markdown or asset zip under `converted/<category>/`.
+
+The agent can run as a plain foreground worker, an optional tray/menu-bar app, or a user-level background service. Folder routing is local and deterministic by default, with optional Ollama-assisted category selection when explicitly enabled.
 
 ## Install
 
