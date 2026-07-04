@@ -163,17 +163,13 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
 
     menu = QMenu()
     show_action = QAction("Show status")
-    add_action = QAction("Add folder")
     quit_action = QAction("Quit")
     show_action.triggered.connect(lambda: show_window())
-    add_action.triggered.connect(window.add_folder)
     quit_action.triggered.connect(quit_app)
     menu.addAction(show_action)
-    menu.addAction(add_action)
     menu.addSeparator()
     menu.addAction(quit_action)
     tray.setContextMenu(menu)
-    tray.activated.connect(lambda reason: show_window() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
     tray.show()
 
     def show_window() -> None:
