@@ -5,8 +5,10 @@ from subprocess import CompletedProcess
 import pytest
 
 from marker_pdf_agent.worker import (
+    ConversionJob,
     MarkerPdfWorker,
     WorkerConfig,
+    WorkerManager,
     ask_ollama_for_folder,
     build_config,
     discover_ollama_model,
@@ -175,21 +177,49 @@ def test_ensure_dirs_moves_orphaned_processing_files_to_failed(tmp_path: Path) -
 
 def test_convert_loop_allows_same_filename_retry_after_failure(monkeypatch, tmp_path: Path) -> None:
     config = make_config(tmp_path)
-    worker = MarkerPdfWorker(config)
+    manager = WorkerManager([config])
+    worker = manager.workers[0]
     source = config.incoming_dir / "source.pdf"
     worker.seen.add(source)
-    worker.documents.put(source)
+    manager.documents.put(ConversionJob(source, config))
 
-    def fake_process_document(_source: Path) -> None:
-        worker.stop_event.set()
+    def fake_process_document(_self: MarkerPdfWorker, _source: Path) -> None:
+        manager.stop_event.set()
         raise RuntimeError("conversion failed")
 
-    monkeypatch.setattr(worker, "_process_document", fake_process_document)
+    monkeypatch.setattr(MarkerPdfWorker, "_process_document", fake_process_document)
 
-    worker._convert_loop()
+    manager._convert_loop()
 
     assert source not in worker.seen
-    assert worker.documents.unfinished_tasks == 0
+    assert manager.documents.unfinished_tasks == 0
+
+
+def test_worker_manager_processes_multiple_roots_through_one_queue(monkeypatch, tmp_path: Path) -> None:
+    first_config = make_config(tmp_path / "first")
+    second_config = make_config(tmp_path / "second")
+    first_source = first_config.incoming_dir / "first.pdf"
+    second_source = second_config.incoming_dir / "second.pdf"
+    manager = WorkerManager([first_config, second_config])
+    manager.documents.put(ConversionJob(first_source, first_config))
+    manager.documents.put(ConversionJob(second_source, second_config))
+    started: list[str] = []
+    finished: list[str] = []
+
+    def fake_process_document(self: MarkerPdfWorker, source: Path) -> None:
+        started.append(source.name)
+        assert finished == started[:-1]
+        finished.append(source.name)
+        if len(finished) == 2:
+            manager.stop_event.set()
+
+    monkeypatch.setattr(MarkerPdfWorker, "_process_document", fake_process_document)
+
+    manager._convert_loop()
+
+    assert started == ["first.pdf", "second.pdf"]
+    assert finished == ["first.pdf", "second.pdf"]
+    assert manager.documents.unfinished_tasks == 0
 
 
 def test_run_marker_times_out_and_terminates_process(monkeypatch, tmp_path: Path) -> None:

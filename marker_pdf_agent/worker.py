@@ -53,26 +53,26 @@ class WorkerConfig:
     use_ollama: bool
 
 
+@dataclass(frozen=True)
+class ConversionJob:
+    source: Path
+    config: WorkerConfig
+
+
 class MarkerPdfWorker:
-    def __init__(self, config: WorkerConfig) -> None:
+    def __init__(
+        self,
+        config: WorkerConfig,
+        documents: queue.Queue[ConversionJob] | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> None:
         self.config = config
-        self.documents: queue.Queue[Path] = queue.Queue()
-        self.stop_event = threading.Event()
+        self.documents: queue.Queue[ConversionJob] = documents or queue.Queue()
+        self.stop_event = stop_event or threading.Event()
         self.seen: set[Path] = set()
 
     def run(self) -> None:
-        self._ensure_dirs()
-        worker = threading.Thread(target=self._convert_loop, name="marker-converter")
-        worker.start()
-        print(f"Watching {self.config.incoming_dir} for documents. Press Ctrl+C to stop.", flush=True)
-
-        try:
-            while not self.stop_event.is_set():
-                self._scan_once()
-                time.sleep(self.config.poll_interval)
-        finally:
-            self.stop_event.set()
-            worker.join()
+        WorkerManager([self.config]).run()
 
     def _ensure_dirs(self) -> None:
         for directory in (
@@ -92,7 +92,7 @@ class MarkerPdfWorker:
                 continue
             if self._is_stable(path):
                 self.seen.add(path)
-                self.documents.put(path)
+                self.documents.put(ConversionJob(path, self.config))
                 self._progress(f"Queued {path.name}")
 
     def _is_stable(self, path: Path) -> bool:
@@ -104,22 +104,6 @@ class MarkerPdfWorker:
         except FileNotFoundError:
             return False
         return first_size == second.st_size and first_mtime == second.st_mtime
-
-    def _convert_loop(self) -> None:
-        while not self.stop_event.is_set():
-            try:
-                source = self.documents.get(timeout=0.5)
-            except queue.Empty:
-                continue
-
-            try:
-                self._process_document(source)
-            except Exception as exc:  # noqa: BLE001 - keep worker alive after per-file failures.
-                print(f"Failed to process {source.name}: {exc}", flush=True)
-                self._move_to_failed(source)
-            finally:
-                self.seen.discard(source)
-                self.documents.task_done()
 
     def _process_document(self, source: Path) -> None:
         self._progress(f"Processing {source.name}")
@@ -533,6 +517,55 @@ class SingletonLock:
             self.handle = None
 
 
+class WorkerManager:
+    def __init__(self, configs: Sequence[WorkerConfig]) -> None:
+        if not configs:
+            raise ValueError("at least one worker config is required")
+        self.documents: queue.Queue[ConversionJob] = queue.Queue()
+        self.stop_event = threading.Event()
+        self.workers = [MarkerPdfWorker(config, self.documents, self.stop_event) for config in configs]
+
+    def run(self) -> None:
+        for worker in self.workers:
+            worker._ensure_dirs()
+        converter = threading.Thread(target=self._convert_loop, name="marker-converter")
+        converter.start()
+        watched = ", ".join(str(worker.config.incoming_dir) for worker in self.workers)
+        print(f"Watching {watched} for documents. Press Ctrl+C to stop.", flush=True)
+
+        try:
+            while not self.stop_event.is_set():
+                for worker in self.workers:
+                    worker._scan_once()
+                time.sleep(min(worker.config.poll_interval for worker in self.workers))
+        finally:
+            self.stop_event.set()
+            converter.join()
+
+    def _convert_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                job = self.documents.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            worker = self._worker_for(job.config)
+            try:
+                worker._process_document(job.source)
+            except Exception as exc:  # noqa: BLE001 - keep manager alive after per-file failures.
+                print(f"Failed to process {job.source.name}: {exc}", flush=True)
+                worker._move_to_failed(job.source)
+            finally:
+                worker.seen.discard(job.source)
+                self.documents.task_done()
+
+    def _worker_for(self, config: WorkerConfig) -> MarkerPdfWorker:
+        for worker in self.workers:
+            if worker.config == config:
+                return worker
+        raise RuntimeError(f"no worker registered for {config.root}")
+
+
 def build_config(args: argparse.Namespace) -> WorkerConfig:
     root = Path(args.root).resolve()
     incoming_dir = (root / args.incoming).resolve()
@@ -611,14 +644,14 @@ def main() -> None:
 
     with SingletonLock(singleton_lock_path()):
         config = build_config(args)
-        worker = MarkerPdfWorker(config)
+        manager = WorkerManager([config])
 
         def stop(_signum: int, _frame: object) -> None:
-            worker.stop_event.set()
+            manager.stop_event.set()
 
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
-        worker.run()
+        manager.run()
 
 
 if __name__ == "__main__":
