@@ -59,6 +59,10 @@ Useful flags:
 
 The worker itself stays plain Python. Because `marker-pdf` can be GPU-heavy, the agent uses a user-level singleton lock and is intended to run as one background worker per user. That one worker owns the conversion queue and processes one document at a time.
 
+Internally, foreground runs go through a worker manager with a single shared conversion queue. This is important for future multi-folder and status-bar UI support: multiple monitored folders may enqueue documents, but only one converter loop drains the queue, so only one `marker-pdf` subprocess should use the GPU at a time.
+
+The planned status-bar UI is intended for synchronous foreground runs rather than installed daemon/service runs. It should sit on top of the same worker manager, display the current queue and active document, and stop the manager cleanly when the user chooses quit.
+
 The service CLI detects the current operating system and writes the native service definition for that platform:
 
 - macOS: user LaunchAgent plist in `~/Library/LaunchAgents/`
