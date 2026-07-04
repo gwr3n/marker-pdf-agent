@@ -10,6 +10,12 @@ Use the local virtual environment:
 venv/bin/python -m pip install -r requirements.txt
 ```
 
+Install the optional desktop GUI dependencies when you want the status-bar app:
+
+```sh
+venv/bin/python -m pip install ".[gui]"
+```
+
 `ollama` is optional. If the `ollama` CLI is present and a recent fast model such as `llama3.1`, `llama3`, `mistral`, `phi3`, or `gemma2` is installed, the worker uses it to choose the destination folder. Otherwise converted files go to `converted/uncategorized`.
 
 ## Run
@@ -21,6 +27,29 @@ venv/bin/python -m marker_pdf_agent.worker run
 ```
 
 For compatibility, running without the `run` subcommand still starts the foreground worker.
+
+## Status-Bar GUI
+
+The status-bar GUI is for synchronous foreground runs, not installed daemon/service runs. It uses the same worker manager as the command-line foreground worker, displays the current queue and active document, and still allows only one `marker-pdf` conversion at a time.
+
+Install the optional GUI extra before using this mode:
+
+```sh
+venv/bin/python -m pip install ".[gui]"
+```
+
+Launch it with either command:
+
+```sh
+venv/bin/python -m marker_pdf_agent.worker tray --root /path/to/folder
+venv/bin/python -m marker_pdf_agent.worker run --tray --root /path/to/folder
+```
+
+Click the status-bar icon to open the status window. The window shows the active document, queue length, and monitored folders. It also has controls to open a selected folder's `incoming/` or `converted/` directory, add a monitored folder, remove a monitored folder, and quit the foreground worker cleanly.
+
+Monitored folders are persisted in `~/.marker-pdf-agent/config.json` by default. Use `--config /path/to/config.json` to choose a different config file. The `--root` folder passed at launch is added to that file automatically, and folders added or removed from the GUI update the same file.
+
+Multiple monitored folders share one conversion queue and one converter loop. Files from any monitored `incoming/` folder may be queued, but only one `marker-pdf` subprocess runs at a time.
 
 By default the worker creates and uses these folders:
 
@@ -48,6 +77,7 @@ venv/bin/python -m marker_pdf_agent.worker \
 Useful flags:
 
 - `--root`: manage a folder other than the current working directory
+- `--config`: choose the persisted foreground GUI config file, defaults to `~/.marker-pdf-agent/config.json`
 - `--incoming`: choose the watched subfolder
 - `--converted`: choose the output subfolder
 - `--marker-command`: choose the `marker-pdf` executable, defaults to `marker_single`
@@ -59,9 +89,7 @@ Useful flags:
 
 The worker itself stays plain Python. Because `marker-pdf` can be GPU-heavy, the agent uses a user-level singleton lock and is intended to run as one background worker per user. That one worker owns the conversion queue and processes one document at a time.
 
-Internally, foreground runs go through a worker manager with a single shared conversion queue. This is important for future multi-folder and status-bar UI support: multiple monitored folders may enqueue documents, but only one converter loop drains the queue, so only one `marker-pdf` subprocess should use the GPU at a time.
-
-The planned status-bar UI is intended for synchronous foreground runs rather than installed daemon/service runs. It should sit on top of the same worker manager, display the current queue and active document, and stop the manager cleanly when the user chooses quit.
+Internally, foreground runs go through a worker manager with a single shared conversion queue. This is important for multi-folder and status-bar UI support: multiple monitored folders may enqueue documents, but only one converter loop drains the queue, so only one `marker-pdf` subprocess should use the GPU at a time.
 
 The service CLI detects the current operating system and writes the native service definition for that platform:
 

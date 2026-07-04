@@ -11,11 +11,15 @@ from marker_pdf_agent.worker import (
     WorkerManager,
     ask_ollama_for_folder,
     build_config,
+    build_tray_configs,
     discover_ollama_model,
     install_launchd_service,
     install_systemd_user_service,
     install_windows_service_instructions,
+    load_monitored_roots,
     parse_args,
+    run_tray,
+    save_monitored_roots,
     service_label,
     service_run_arguments,
     SingletonLock,
@@ -222,6 +226,19 @@ def test_worker_manager_processes_multiple_roots_through_one_queue(monkeypatch, 
     assert manager.documents.unfinished_tasks == 0
 
 
+def test_worker_manager_adds_and_removes_roots(tmp_path: Path) -> None:
+    first_config = make_config(tmp_path / "first")
+    second_config = make_config(tmp_path / "second")
+    manager = WorkerManager([first_config])
+
+    assert manager.add_config(second_config) is True
+    assert manager.add_config(second_config) is False
+    assert manager.status().roots == (first_config.root, second_config.root)
+    assert manager.remove_root(second_config.root) is True
+    assert manager.remove_root(first_config.root) is False
+    assert manager.status().roots == (first_config.root,)
+
+
 def test_run_marker_times_out_and_terminates_process(monkeypatch, tmp_path: Path) -> None:
     config = WorkerConfig(**{**make_config(tmp_path).__dict__, "marker_timeout": 0.01})
     worker = MarkerPdfWorker(config)
@@ -414,6 +431,54 @@ def test_parse_args_keeps_legacy_run_mode(tmp_path: Path) -> None:
     assert args.command == "run"
     assert args.root == str(tmp_path)
     assert args.no_ollama is True
+
+
+def test_parse_args_supports_tray_modes(tmp_path: Path) -> None:
+    direct = parse_args(["tray", "--root", str(tmp_path), "--no-ollama"])
+    flagged = parse_args(["run", "--tray", "--root", str(tmp_path), "--no-ollama"])
+
+    assert direct.command == "tray"
+    assert direct.tray is True
+    assert flagged.command == "run"
+    assert flagged.tray is True
+
+
+def test_save_and_load_monitored_roots_deduplicates(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+
+    save_monitored_roots(config_path, [first, second, first])
+
+    assert load_monitored_roots(config_path) == [first.resolve(), second.resolve()]
+    assert '"roots"' in config_path.read_text(encoding="utf-8")
+
+
+def test_build_tray_configs_persists_explicit_and_saved_roots(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("marker_pdf_agent.worker.discover_ollama_model", lambda preferred: None)
+    config_path = tmp_path / "config.json"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    save_monitored_roots(config_path, [second])
+    args = parse_args(["tray", "--root", str(first), "--config", str(config_path), "--no-ollama"])
+
+    path, configs = build_tray_configs(args)
+
+    assert path == config_path.resolve()
+    assert [config.root for config in configs] == [first.resolve(), second.resolve()]
+    assert load_monitored_roots(config_path) == [first.resolve(), second.resolve()]
+
+
+def test_run_tray_reports_missing_gui_dependency(monkeypatch, tmp_path: Path) -> None:
+    args = parse_args(["tray", "--root", str(tmp_path), "--config", str(tmp_path / "config.json"), "--no-ollama"])
+
+    def fake_run_tray_app(_manager: WorkerManager, _args: Namespace, _config_path: Path) -> None:
+        raise RuntimeError('install GUI dependencies with: venv/bin/python -m pip install ".[gui]"')
+
+    monkeypatch.setattr("marker_pdf_agent.tray.run_tray_app", fake_run_tray_app)
+
+    with pytest.raises(RuntimeError, match="install GUI dependencies"):
+        run_tray(args)
 
 
 def test_service_run_arguments_use_current_python_and_run_subcommand(monkeypatch, tmp_path: Path) -> None:

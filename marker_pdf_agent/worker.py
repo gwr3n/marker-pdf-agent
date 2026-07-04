@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import plistlib
@@ -36,6 +37,7 @@ DOCUMENT_EXTENSIONS = {
 FAST_OLLAMA_MODELS = ("llama3.1", "llama3", "mistral", "phi3", "gemma2")
 SYSTEM_FOLDERS = {"incoming", "processing", "converted", "failed", ".marker-pdf-agent"}
 DEFAULT_SERVICE_NAME = "marker-pdf-agent"
+DEFAULT_CONFIG_NAME = "config.json"
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,15 @@ class WorkerConfig:
 class ConversionJob:
     source: Path
     config: WorkerConfig
+
+
+@dataclass(frozen=True)
+class WorkerStatus:
+    roots: tuple[Path, ...]
+    queue_size: int
+    current_document: str | None
+    current_root: Path | None
+    stopping: bool
 
 
 class MarkerPdfWorker:
@@ -523,21 +534,24 @@ class WorkerManager:
             raise ValueError("at least one worker config is required")
         self.documents: queue.Queue[ConversionJob] = queue.Queue()
         self.stop_event = threading.Event()
+        self.current_job: ConversionJob | None = None
+        self._workers_lock = threading.Lock()
         self.workers = [MarkerPdfWorker(config, self.documents, self.stop_event) for config in configs]
 
     def run(self) -> None:
-        for worker in self.workers:
+        for worker in self.worker_snapshot():
             worker._ensure_dirs()
         converter = threading.Thread(target=self._convert_loop, name="marker-converter")
         converter.start()
-        watched = ", ".join(str(worker.config.incoming_dir) for worker in self.workers)
+        watched = ", ".join(str(worker.config.incoming_dir) for worker in self.worker_snapshot())
         print(f"Watching {watched} for documents. Press Ctrl+C to stop.", flush=True)
 
         try:
             while not self.stop_event.is_set():
-                for worker in self.workers:
+                workers = self.worker_snapshot()
+                for worker in workers:
                     worker._scan_once()
-                time.sleep(min(worker.config.poll_interval for worker in self.workers))
+                time.sleep(min(worker.config.poll_interval for worker in workers))
         finally:
             self.stop_event.set()
             converter.join()
@@ -550,6 +564,7 @@ class WorkerManager:
                 continue
 
             worker = self._worker_for(job.config)
+            self.current_job = job
             try:
                 worker._process_document(job.source)
             except Exception as exc:  # noqa: BLE001 - keep manager alive after per-file failures.
@@ -557,13 +572,112 @@ class WorkerManager:
                 worker._move_to_failed(job.source)
             finally:
                 worker.seen.discard(job.source)
+                self.current_job = None
                 self.documents.task_done()
 
     def _worker_for(self, config: WorkerConfig) -> MarkerPdfWorker:
-        for worker in self.workers:
+        for worker in self.worker_snapshot():
             if worker.config == config:
                 return worker
-        raise RuntimeError(f"no worker registered for {config.root}")
+        return MarkerPdfWorker(config, self.documents, self.stop_event)
+
+    def worker_snapshot(self) -> list[MarkerPdfWorker]:
+        with self._workers_lock:
+            return list(self.workers)
+
+    def add_config(self, config: WorkerConfig) -> bool:
+        with self._workers_lock:
+            if any(worker.config.root == config.root for worker in self.workers):
+                return False
+            worker = MarkerPdfWorker(config, self.documents, self.stop_event)
+            worker._ensure_dirs()
+            self.workers.append(worker)
+            return True
+
+    def remove_root(self, root: Path) -> bool:
+        resolved = root.resolve()
+        with self._workers_lock:
+            if len(self.workers) <= 1:
+                return False
+            before = len(self.workers)
+            self.workers = [worker for worker in self.workers if worker.config.root != resolved]
+            return len(self.workers) != before
+
+    def roots(self) -> list[Path]:
+        return [worker.config.root for worker in self.worker_snapshot()]
+
+    def status(self) -> WorkerStatus:
+        current_job = self.current_job
+        return WorkerStatus(
+            roots=tuple(self.roots()),
+            queue_size=self.documents.qsize(),
+            current_document=current_job.source.name if current_job else None,
+            current_root=current_job.config.root if current_job else None,
+            stopping=self.stop_event.is_set(),
+        )
+
+
+def user_config_path() -> Path:
+    return Path.home() / ".marker-pdf-agent" / DEFAULT_CONFIG_NAME
+
+
+def agent_config_path(args: argparse.Namespace) -> Path:
+    value = getattr(args, "config", None)
+    return Path(value).expanduser().resolve() if value else user_config_path()
+
+
+def load_monitored_roots(path: Path) -> list[Path]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid marker-pdf-agent config at {path}: {exc}") from exc
+
+    roots = data.get("roots", [])
+    if not isinstance(roots, list):
+        raise RuntimeError(f"invalid marker-pdf-agent config at {path}: roots must be a list")
+    return unique_roots(Path(root).expanduser().resolve() for root in roots if isinstance(root, str))
+
+
+def save_monitored_roots(path: Path, roots: Iterable[Path]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"roots": [str(root) for root in unique_roots(root.resolve() for root in roots)]}
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def unique_roots(roots: Iterable[Path]) -> list[Path]:
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        unique.append(root)
+    return unique
+
+
+def build_config_for_root(args: argparse.Namespace, root: Path) -> WorkerConfig:
+    namespace = argparse.Namespace(**vars(args))
+    namespace.root = str(root)
+    return build_config(namespace)
+
+
+def build_tray_configs(args: argparse.Namespace) -> tuple[Path, list[WorkerConfig]]:
+    path = agent_config_path(args)
+    roots = load_monitored_roots(path)
+    explicit_root = Path(args.root).expanduser().resolve()
+    roots = unique_roots([explicit_root, *roots])
+    save_monitored_roots(path, roots)
+    return path, [build_config_for_root(args, root) for root in roots]
+
+
+def run_tray(args: argparse.Namespace) -> None:
+    config_path, configs = build_tray_configs(args)
+    manager = WorkerManager(configs)
+    from marker_pdf_agent.tray import run_tray_app
+
+    run_tray_app(manager, args, config_path)
 
 
 def build_config(args: argparse.Namespace) -> WorkerConfig:
@@ -590,6 +704,7 @@ def build_config(args: argparse.Namespace) -> WorkerConfig:
 
 def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", default=os.getcwd(), help="Folder to manage. Defaults to the launch directory.")
+    parser.add_argument("--config", help="Path to the persisted foreground GUI configuration file.")
     parser.add_argument("--incoming", default="incoming", help="Subfolder to watch for moved-in documents.")
     parser.add_argument("--converted", default="converted", help="Subfolder where routed markdown artifacts are placed.")
     parser.add_argument("--poll-interval", type=float, default=2.0, help="Seconds between scans.")
@@ -602,12 +717,13 @@ def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = list(sys.argv[1:] if argv is None else argv)
-    commands = {"run", "install-service", "uninstall-service", "status"}
+    commands = {"run", "tray", "install-service", "uninstall-service", "status"}
     if not args or args[0] not in commands:
         parser = argparse.ArgumentParser(description="Convert newly dropped documents with marker-pdf in a background queue.")
         add_worker_arguments(parser)
+        parser.add_argument("--tray", action="store_true", help="Run with the optional foreground status-bar GUI.")
         parsed = parser.parse_args(args)
-        parsed.command = "run"
+        parsed.command = "tray" if parsed.tray else "run"
         parsed.service_name = DEFAULT_SERVICE_NAME
         return parsed
 
@@ -615,7 +731,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
     run_parser = subparsers.add_parser("run", help="Run the foreground worker.")
     add_worker_arguments(run_parser)
+    run_parser.add_argument("--tray", action="store_true", help="Run with the optional foreground status-bar GUI.")
     run_parser.set_defaults(service_name=DEFAULT_SERVICE_NAME)
+
+    tray_parser = subparsers.add_parser("tray", help="Run the foreground status-bar GUI.")
+    add_worker_arguments(tray_parser)
+    tray_parser.set_defaults(service_name=DEFAULT_SERVICE_NAME, tray=True)
 
     install_parser = subparsers.add_parser("install-service", help="Install a platform-specific background service definition.")
     add_worker_arguments(install_parser)
@@ -632,6 +753,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.command == "run" and getattr(args, "tray", False):
+        args.command = "tray"
     if args.command == "install-service":
         install_service(args)
         return
@@ -643,6 +766,10 @@ def main() -> None:
         return
 
     with SingletonLock(singleton_lock_path()):
+        if args.command == "tray":
+            run_tray(args)
+            return
+
         config = build_config(args)
         manager = WorkerManager([config])
 
