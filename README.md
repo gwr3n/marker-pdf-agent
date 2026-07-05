@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/gwr3n/marker-pdf-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/gwr3n/marker-pdf-agent/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/marker-pdf-agent.svg)](https://pypi.org/project/marker-pdf-agent/)
-[![PyPI - Wheel](https://img.shields.io/pypi/wheel/marker-pdf-agent)](https://pypi.org/project/marker-pdf-agent/)
+[![PyPI - Wheel](https://img.shields.io/pypi/wheel/marker_pdf_agent)](https://pypi.org/project/marker-pdf-agent/)
 [![GitHub last commit](https://img.shields.io/github/last-commit/gwr3n/marker-pdf-agent)](https://github.com/gwr3n/marker-pdf-agent/commits/main)
 [![Downloads](https://static.pepy.tech/badge/marker-pdf-agent)](https://pepy.tech/project/marker-pdf-agent)
 [![Python](https://img.shields.io/pypi/pyversions/marker-pdf-agent.svg)](https://pypi.org/project/marker-pdf-agent/)
