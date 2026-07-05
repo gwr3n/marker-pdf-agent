@@ -17,22 +17,16 @@ The agent can run as a plain foreground worker, an optional tray/menu-bar app, o
 
 ## Install
 
-Use the local virtual environment:
+PYPI installation:
 
 ```sh
-venv/bin/python -m pip install -r requirements.txt
+pip install marker-pdf-agent
 ```
 
 Install the optional desktop GUI dependencies when you want the status-bar app:
 
 ```sh
-venv/bin/python -m pip install ".[gui]"
-```
-
-When installing from a built wheel, put the extra on the wheel filename:
-
-```sh
-venv/bin/python -m pip install "dist/marker_pdf_agent-0.1.0-py3-none-any.whl[gui]"
+pip install "marker-pdf-agent[gui]"
 ```
 
 `ollama` is optional and is not started or queried unless you explicitly pass `--ollama-model`. Without that flag, converted files go to `converted/uncategorized`.
@@ -42,7 +36,7 @@ venv/bin/python -m pip install "dist/marker_pdf_agent-0.1.0-py3-none-any.whl[gui
 From the folder you want the agent to manage:
 
 ```sh
-venv/bin/python -m marker_pdf_agent.worker run
+python -m marker_pdf_agent.worker run
 ```
 
 For compatibility, running without the `run` subcommand still starts the foreground worker.
@@ -51,17 +45,11 @@ For compatibility, running without the `run` subcommand still starts the foregro
 
 The status-bar GUI is for synchronous foreground runs, not installed daemon/service runs. It uses the same worker manager as the command-line foreground worker, shows a compact `Idle` or `Converting` state plus queue size, and still allows only one `marker-pdf` conversion at a time. On macOS it runs as a menu-bar app rather than showing a Dock icon.
 
-Install the optional GUI extra before using this mode:
-
-```sh
-venv/bin/python -m pip install ".[gui]"
-```
-
 Launch it with either command:
 
 ```sh
-venv/bin/python -m marker_pdf_agent.worker tray --root /path/to/folder
-venv/bin/python -m marker_pdf_agent.worker run --tray --root /path/to/folder
+python -m marker_pdf_agent.worker --tray
+python -m marker_pdf_agent.worker --tray --root /path/to/folder
 ```
 
 Click the status-bar icon to open the menu. The menu refreshes when opened and shows the worker state, queue length, and monitored folders. It also has controls to open a folder's `incoming/` or `converted/` directory, add or remove monitored folders, and quit the foreground worker cleanly. Detailed progress and routing messages are printed to stdout.
@@ -86,7 +74,7 @@ If a conversion fails, times out, or is interrupted during shutdown, the source 
 ## Options
 
 ```sh
-venv/bin/python -m marker_pdf_agent.worker \
+python -m marker_pdf_agent.worker \
   --root /path/to/folder \
   --incoming incoming \
   --converted converted \
@@ -121,7 +109,7 @@ The service CLI detects the current operating system and writes the native servi
 Install a service for a managed folder:
 
 ```sh
-venv/bin/python -m marker_pdf_agent.worker install-service --root /path/to/folder
+python -m marker_pdf_agent.worker install-service --root /path/to/folder
 ```
 
 Then start it with the command printed by the installer. On macOS this is a `launchctl bootstrap ...` command. On Linux this is a `systemctl --user daemon-reload && systemctl --user enable --now ...` command. Windows needs an additional service host, because Python cannot install a native Windows service without one.
@@ -129,14 +117,14 @@ Then start it with the command printed by the installer. On macOS this is a `lau
 Check or remove the service definition:
 
 ```sh
-venv/bin/python -m marker_pdf_agent.worker status
-venv/bin/python -m marker_pdf_agent.worker uninstall-service
+python -m marker_pdf_agent.worker status
+python -m marker_pdf_agent.worker uninstall-service
 ```
 
 The `--service-name` option changes the installed service definition name. It is mainly useful when replacing or testing service definitions; running multiple agent services at once is not recommended, and the runtime lock prevents concurrent worker processes for the same user.
 
 ```sh
-venv/bin/python -m marker_pdf_agent.worker install-service \
+python -m marker_pdf_agent.worker install-service \
   --service-name marker-pdf-agent \
   --root /path/to/folder
 ```
