@@ -60,6 +60,14 @@ marker-pdf-agent tray
 marker-pdf-agent tray --root /path/to/folder
 ```
 
+To create a clickable launcher in the managed folder, run:
+
+```sh
+marker-pdf-agent install-launcher --root /path/to/folder
+```
+
+The installer writes the native launcher format for the current operating system: a `.app` bundle on macOS, a `.desktop` file on Linux, or a `.cmd` launcher on Windows. The launcher starts the status-bar app for that folder using the Python environment that created it, so it does not depend on your desktop session inheriting the same `PATH` as your terminal. Use `--launcher-name "Marker PDF Agent"` to choose a different display name.
+
 Click the status-bar icon to open the menu. From there you can add or remove monitored folders, choose an Ollama routing model, refresh the installed Ollama model list, and quit cleanly. Detailed progress and routing messages are printed to the terminal that launched the app.
 
 Use the `Ollama routing` submenu to choose `Disabled` or one of the installed Ollama models. Choose `Refresh models` to query `ollama list` in the background; the app does not query Ollama just from opening the tray menu. The selected model is persisted with the tray config and applies to all monitored folders.
@@ -101,6 +109,7 @@ Useful flags:
 - `--marker-timeout`: maximum seconds to allow one conversion before moving it to failed, defaults to 1800
 - `--ollama-model`: enable AI folder routing with a specific installed Ollama model
 - `--no-ollama`: disable AI folder routing; this is the default unless `--ollama-model` is set
+- `--launcher-name`: choose the display name when using `install-launcher`, defaults to `Marker PDF Agent`
 
 ## Background Service
 

@@ -17,8 +17,12 @@ from marker_pdf_agent.worker import (
     build_config,
     build_tray_configs,
     install_launchd_service,
+    install_linux_desktop_launcher,
+    install_macos_app_launcher,
     install_systemd_user_service,
+    install_windows_cmd_launcher,
     install_windows_service_instructions,
+    launcher_run_arguments,
     list_ollama_models,
     load_agent_config,
     load_monitored_roots,
@@ -599,6 +603,14 @@ def test_parse_args_supports_tray_modes(tmp_path: Path) -> None:
     assert flagged.tray is True
 
 
+def test_parse_args_supports_install_launcher(tmp_path: Path) -> None:
+    args = parse_args(["install-launcher", "--root", str(tmp_path), "--launcher-name", "Marker PDF Agent"])
+
+    assert args.command == "install-launcher"
+    assert args.root == str(tmp_path)
+    assert args.launcher_name == "Marker PDF Agent"
+
+
 def test_save_and_load_monitored_roots_deduplicates(tmp_path: Path) -> None:
     config_path = tmp_path / "config.json"
     first = tmp_path / "first"
@@ -661,6 +673,23 @@ def test_service_run_arguments_use_current_python_and_run_subcommand(monkeypatch
     assert command[-1] == "--no-ollama"
 
 
+def test_launcher_run_arguments_use_current_python_and_tray_subcommand(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", "/example/python")
+    config_path = tmp_path / "config.json"
+    args = parse_args(
+        ["install-launcher", "--root", str(tmp_path), "--config", str(config_path), "--incoming", "dropbox"]
+    )
+
+    command = launcher_run_arguments(args)
+
+    assert command[:5] == ["/example/python", "-m", "marker_pdf_agent.worker", "tray", "--root"]
+    assert str(tmp_path) in command
+    assert "--config" in command
+    assert str(config_path) in command
+    assert "--incoming" in command
+    assert "dropbox" in command
+
+
 def test_install_launchd_service_writes_plist(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", "/example/python")
@@ -702,6 +731,53 @@ def test_install_windows_service_instructions_write_service_host_values(monkeypa
     assert "Service name: MarkerPdfAgent" in content
     assert "Application: C:/Python/python.exe" in content
     assert "Arguments: -m marker_pdf_agent.worker run --root" in content
+
+
+def test_install_macos_app_launcher_writes_app_bundle(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", "/example/python")
+    root = tmp_path / "managed folder"
+    root.mkdir()
+    args = parse_args(["install-launcher", "--root", str(root), "--launcher-name", "Marker PDF Agent"])
+
+    path = install_macos_app_launcher(args)
+
+    assert path == root / "Marker PDF Agent.app"
+    executable = path / "Contents" / "MacOS" / "marker-pdf-agent"
+    assert executable.read_text(encoding="utf-8").startswith("#!/bin/sh\nexec /example/python -m")
+    assert "marker_pdf_agent.worker tray --root" in executable.read_text(encoding="utf-8")
+    assert executable.stat().st_mode & 0o111
+    assert "Marker PDF Agent" in (path / "Contents" / "Info.plist").read_text(encoding="utf-8")
+
+
+def test_install_linux_desktop_launcher_writes_desktop_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", "/example/python")
+    root = tmp_path / "managed folder"
+    root.mkdir()
+    args = parse_args(["install-launcher", "--root", str(root), "--marker-command", "marker single"])
+
+    path = install_linux_desktop_launcher(args)
+
+    assert path == root / "Marker PDF Agent.desktop"
+    content = path.read_text(encoding="utf-8")
+    assert "Name=Marker PDF Agent" in content
+    assert 'Exec=/example/python -m marker_pdf_agent.worker tray --root "' in content
+    assert '"marker single"' in content
+    assert "Terminal=false" in content
+    assert path.stat().st_mode & 0o111
+
+
+def test_install_windows_cmd_launcher_writes_cmd_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", "C:/Python/python.exe")
+    root = tmp_path / "managed"
+    root.mkdir()
+    args = parse_args(["install-launcher", "--root", str(root), "--launcher-name", "Marker PDF Agent"])
+
+    path = install_windows_cmd_launcher(args)
+
+    assert path == root / "Marker PDF Agent.cmd"
+    content = path.read_text(encoding="utf-8")
+    assert content.startswith("@echo off")
+    assert 'start "" C:/Python/python.exe -m marker_pdf_agent.worker tray --root' in content
 
 
 def test_service_label_adds_launchd_domain_when_needed() -> None:

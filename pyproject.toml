@@ -1,6 +1,6 @@
 [project]
 name = "marker-pdf-agent"
-version = "1.0.0"
+version = "1.1.0"
 description = "Document conversion agent that watches folders, converts files with marker-pdf, and routes Markdown outputs."
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"

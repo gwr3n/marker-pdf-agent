@@ -7,6 +7,7 @@ import platform
 import plistlib
 import queue
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -334,6 +335,30 @@ def service_run_arguments(args: argparse.Namespace) -> list[str]:
     return command
 
 
+def launcher_run_arguments(args: argparse.Namespace) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "marker_pdf_agent.worker",
+        "tray",
+        "--root",
+        str(Path(args.root).resolve()),
+    ]
+    if args.config:
+        command.extend(["--config", str(Path(args.config).resolve())])
+    command.extend(["--incoming", args.incoming])
+    command.extend(["--converted", args.converted])
+    command.extend(["--poll-interval", str(args.poll_interval)])
+    command.extend(["--stable-seconds", str(args.stable_seconds)])
+    command.extend(["--marker-command", args.marker_command])
+    command.extend(["--marker-timeout", str(args.marker_timeout)])
+    if args.ollama_model:
+        command.extend(["--ollama-model", args.ollama_model])
+    if args.no_ollama:
+        command.append("--no-ollama")
+    return command
+
+
 def install_service(args: argparse.Namespace) -> None:
     system = platform.system()
     if system == "Darwin":
@@ -355,6 +380,19 @@ def install_service(args: argparse.Namespace) -> None:
         print(f"Wrote Windows service setup instructions to {path}", flush=True)
         return
     raise RuntimeError(f"unsupported platform for service install: {system}")
+
+
+def install_launcher(args: argparse.Namespace) -> None:
+    system = platform.system()
+    if system == "Darwin":
+        path = install_macos_app_launcher(args)
+    elif system == "Linux":
+        path = install_linux_desktop_launcher(args)
+    elif system == "Windows":
+        path = install_windows_cmd_launcher(args)
+    else:
+        raise RuntimeError(f"unsupported platform for launcher install: {system}")
+    print(f"Installed launcher at {path}", flush=True)
 
 
 def uninstall_service(args: argparse.Namespace) -> None:
@@ -480,6 +518,57 @@ def install_windows_service_instructions(args: argparse.Namespace) -> Path:
     return path
 
 
+def install_macos_app_launcher(args: argparse.Namespace) -> Path:
+    root = Path(args.root).resolve()
+    app_path = root / f"{launcher_name(args.launcher_name)}.app"
+    macos_dir = app_path / "Contents" / "MacOS"
+    macos_dir.mkdir(parents=True, exist_ok=True)
+    executable = macos_dir / "marker-pdf-agent"
+    command = " ".join(shlex.quote(part) for part in launcher_run_arguments(args))
+    executable.write_text(f"#!/bin/sh\nexec {command}\n", encoding="utf-8")
+    executable.chmod(0o755)
+    plist = {
+        "CFBundleName": args.launcher_name,
+        "CFBundleDisplayName": args.launcher_name,
+        "CFBundleIdentifier": "local.marker-pdf-agent.launcher",
+        "CFBundleExecutable": "marker-pdf-agent",
+        "CFBundlePackageType": "APPL",
+    }
+    with (app_path / "Contents" / "Info.plist").open("wb") as handle:
+        plistlib.dump(plist, handle, sort_keys=False)
+    return app_path
+
+
+def install_linux_desktop_launcher(args: argparse.Namespace) -> Path:
+    root = Path(args.root).resolve()
+    name = launcher_name(args.launcher_name)
+    path = root / f"{name}.desktop"
+    command = " ".join(quote_desktop_argument(part) for part in launcher_run_arguments(args))
+    content = "\n".join(
+        [
+            "[Desktop Entry]",
+            "Type=Application",
+            f"Name={args.launcher_name}",
+            "Comment=Launch the marker-pdf-agent status-bar app",
+            f"Exec={command}",
+            "Terminal=false",
+            "Categories=Utility;",
+            "",
+        ]
+    )
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def install_windows_cmd_launcher(args: argparse.Namespace) -> Path:
+    root = Path(args.root).resolve()
+    path = root / f"{launcher_name(args.launcher_name)}.cmd"
+    command = subprocess.list2cmdline(launcher_run_arguments(args))
+    path.write_text(f'@echo off\r\nstart "" {command}\r\n', encoding="utf-8")
+    return path
+
+
 def launchd_plist_path(name: str) -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{service_label(name)}.plist"
 
@@ -490,6 +579,18 @@ def systemd_user_service_path(name: str) -> Path:
 
 def windows_service_instruction_path(root: Path) -> Path:
     return service_state_dir(root) / "windows-service.md"
+
+
+def launcher_name(name: str) -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "-", name).strip(" .-")
+    return cleaned or "marker-pdf-agent"
+
+
+def quote_desktop_argument(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if not escaped or re.search(r"\s", escaped):
+        return f'"{escaped}"'
+    return escaped
 
 
 def quote_systemd_argument(value: str) -> str:
@@ -849,7 +950,7 @@ def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args = list(sys.argv[1:] if argv is None else argv)
-    commands = {"run", "tray", "install-service", "uninstall-service", "status"}
+    commands = {"run", "tray", "install-launcher", "install-service", "uninstall-service", "status"}
     if not args or args[0] not in commands:
         parser = argparse.ArgumentParser(
             description="Convert newly dropped documents with marker-pdf in a background queue."
@@ -882,6 +983,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--service-name", default=DEFAULT_SERVICE_NAME, help="Service name or label to install."
     )
 
+    launcher_parser = subparsers.add_parser(
+        "install-launcher", help="Create a platform-specific launcher in the managed folder."
+    )
+    add_worker_arguments(launcher_parser)
+    launcher_parser.add_argument(
+        "--launcher-name", default="Marker PDF Agent", help="Display name for the generated launcher."
+    )
+    launcher_parser.set_defaults(service_name=DEFAULT_SERVICE_NAME)
+
     uninstall_parser = subparsers.add_parser(
         "uninstall-service", help="Remove the platform-specific service definition."
     )
@@ -903,6 +1013,9 @@ def main() -> None:
         args.command = "tray"
     if args.command == "install-service":
         install_service(args)
+        return
+    if args.command == "install-launcher":
+        install_launcher(args)
         return
     if args.command == "uninstall-service":
         uninstall_service(args)
