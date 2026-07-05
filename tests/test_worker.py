@@ -709,6 +709,7 @@ def test_service_run_arguments_use_current_python_and_run_subcommand(monkeypatch
 
 def test_launcher_run_arguments_use_current_python_and_tray_subcommand(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", "/example/python")
+    monkeypatch.setattr("marker_pdf_agent.worker.shutil.which", lambda command: f"/example/bin/{command}")
     config_path = tmp_path / "config.json"
     args = parse_args(
         ["install-launcher", "--root", str(tmp_path), "--config", str(config_path), "--incoming", "dropbox"]
@@ -722,6 +723,18 @@ def test_launcher_run_arguments_use_current_python_and_tray_subcommand(monkeypat
     assert str(config_path) in command
     assert "--incoming" in command
     assert "dropbox" in command
+    assert "--marker-command" in command
+    assert "/example/bin/marker_single" in command
+
+
+def test_launcher_run_arguments_preserve_custom_marker_command(tmp_path: Path) -> None:
+    marker_command = str(tmp_path / "bin" / "marker single")
+    args = parse_args(["install-launcher", "--root", str(tmp_path), "--marker-command", marker_command])
+
+    command = launcher_run_arguments(args)
+
+    assert "--marker-command" in command
+    assert marker_command in command
 
 
 def test_install_launchd_service_writes_plist(monkeypatch, tmp_path: Path) -> None:

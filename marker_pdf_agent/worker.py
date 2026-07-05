@@ -355,13 +355,20 @@ def launcher_run_arguments(args: argparse.Namespace) -> list[str]:
     command.extend(["--converted", args.converted])
     command.extend(["--poll-interval", str(args.poll_interval)])
     command.extend(["--stable-seconds", str(args.stable_seconds)])
-    command.extend(["--marker-command", args.marker_command])
+    command.extend(["--marker-command", launcher_marker_command(args.marker_command)])
     command.extend(["--marker-timeout", str(args.marker_timeout)])
     if args.ollama_model:
         command.extend(["--ollama-model", args.ollama_model])
     if args.no_ollama:
         command.append("--no-ollama")
     return command
+
+
+def launcher_marker_command(marker_command: str) -> str:
+    if os.path.basename(marker_command) != marker_command:
+        return marker_command
+    resolved = shutil.which(marker_command)
+    return resolved or marker_command
 
 
 def install_service(args: argparse.Namespace) -> None:
