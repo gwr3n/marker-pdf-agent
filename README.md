@@ -38,13 +38,13 @@ Python 3.10 or newer is required. The core `marker-pdf` dependency is installed 
 Start the agent from the folder you want it to manage:
 
 ```sh
-marker-pdf-agent run
+marker-pdf-agent
 ```
 
 Or choose a folder explicitly:
 
 ```sh
-marker-pdf-agent run --root /path/to/folder
+marker-pdf-agent --root /path/to/folder
 ```
 
 The agent creates the folders it needs on startup. Move documents into `incoming/`, wait for conversion, then collect the output from `converted/uncategorized/` unless you enabled Ollama routing.
