@@ -19,7 +19,6 @@ from marker_pdf_agent.worker import (
 
 
 def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: Path) -> None:
-    hide_macos_dock_icon()
     try:
         from PySide6.QtCore import QObject, Qt, Signal
         from PySide6.QtGui import QIcon, QPainter, QPixmap
@@ -31,7 +30,7 @@ def run_tray_app(manager: WorkerManager, args: argparse.Namespace, config_path: 
             QSystemTrayIcon,
         )
     except ImportError as exc:
-        raise RuntimeError('install GUI dependencies with: venv/bin/python -m pip install ".[gui]"') from exc
+        raise RuntimeError("install GUI dependencies") from exc
 
     class StatusBridge(QObject):
         status_changed = Signal(object)

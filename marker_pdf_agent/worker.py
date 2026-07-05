@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -39,6 +40,10 @@ SYSTEM_FOLDERS = {"incoming", "processing", "converted", "failed", ".marker-pdf-
 ROUTING_RESERVED_FOLDERS = SYSTEM_FOLDERS | {"uncategorized"}
 DEFAULT_SERVICE_NAME = "marker-pdf-agent"
 DEFAULT_CONFIG_NAME = "config.json"
+GUI_DEPENDENCY_ERROR = (
+    "The status-bar app requires optional GUI dependencies. "
+    'Install them with: python -m pip install "marker-pdf-agent[gui]"'
+)
 
 
 @dataclass(frozen=True)
@@ -523,20 +528,60 @@ def install_macos_app_launcher(args: argparse.Namespace) -> Path:
     app_path = root / f"{launcher_name(args.launcher_name)}.app"
     macos_dir = app_path / "Contents" / "MacOS"
     macos_dir.mkdir(parents=True, exist_ok=True)
+    state_dir = service_state_dir(root)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    log_path = state_dir / "launcher.log"
     executable = macos_dir / "marker-pdf-agent"
     command = " ".join(shlex.quote(part) for part in launcher_run_arguments(args))
-    executable.write_text(f"#!/bin/sh\nexec {command}\n", encoding="utf-8")
+    preflight_lines = macos_launcher_preflight_lines(Path(sys.executable), log_path)
+    executable.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"cd {shlex.quote(str(root))}",
+                *preflight_lines,
+                f"/usr/bin/nohup {command} >> {shlex.quote(str(log_path))} 2>&1 &",
+                "exit 0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     executable.chmod(0o755)
     plist = {
         "CFBundleName": args.launcher_name,
         "CFBundleDisplayName": args.launcher_name,
-        "CFBundleIdentifier": "local.marker-pdf-agent.launcher",
+        "CFBundleIdentifier": macos_launcher_bundle_identifier(app_path),
         "CFBundleExecutable": "marker-pdf-agent",
         "CFBundlePackageType": "APPL",
     }
     with (app_path / "Contents" / "Info.plist").open("wb") as handle:
         plistlib.dump(plist, handle, sort_keys=False)
     return app_path
+
+
+def macos_launcher_bundle_identifier(app_path: Path) -> str:
+    digest = hashlib.sha256(str(app_path).encode("utf-8")).hexdigest()[:12]
+    return f"local.marker-pdf-agent.launcher.{digest}"
+
+
+def macos_launcher_preflight_lines(python_path: Path, log_path: Path) -> list[str]:
+    pyvenv_config = python_path.parent.parent / "pyvenv.cfg"
+    if not pyvenv_config.exists():
+        return []
+    message = (
+        f"Marker PDF Agent cannot read {pyvenv_config}. macOS may be blocking app access to this folder. "
+        "Move the managed folder or virtual environment outside protected folders such as Downloads, Desktop, "
+        "or Documents, or grant the launcher Full Disk Access, then reinstall the launcher."
+    )
+    alert = f"display alert {json.dumps('Marker PDF Agent')} message {json.dumps(message)} as critical"
+    return [
+        f"if ! /bin/cat {shlex.quote(str(pyvenv_config))} >/dev/null 2>&1; then",
+        f"  /usr/bin/osascript -e {shlex.quote(alert)} >/dev/null 2>&1",
+        f"  echo {shlex.quote(message)} >> {shlex.quote(str(log_path))}",
+        "  exit 1",
+        "fi",
+    ]
 
 
 def install_linux_desktop_launcher(args: argparse.Namespace) -> Path:
@@ -900,7 +945,44 @@ def run_tray(args: argparse.Namespace) -> None:
     manager = WorkerManager(configs)
     from marker_pdf_agent.tray import run_tray_app
 
-    run_tray_app(manager, args, config_path)
+    try:
+        run_tray_app(manager, args, config_path)
+    except RuntimeError as exc:
+        if not is_gui_dependency_error(exc):
+            raise
+        show_error_box("Marker PDF Agent", GUI_DEPENDENCY_ERROR)
+        print(GUI_DEPENDENCY_ERROR, file=sys.stderr, flush=True)
+        raise SystemExit(1) from exc
+
+
+def is_gui_dependency_error(exc: RuntimeError) -> bool:
+    return "install GUI dependencies" in str(exc)
+
+
+def show_error_box(title: str, message: str) -> None:
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            subprocess.run(
+                ["osascript", "-e", f"display alert {json.dumps(title)} message {json.dumps(message)} as critical"],
+                check=False,
+            )
+            return
+        if system == "Windows":
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)  # type: ignore[attr-defined]
+            return
+
+        import tkinter
+        from tkinter import messagebox
+
+        root = tkinter.Tk()
+        root.withdraw()
+        messagebox.showerror(title, message)
+        root.destroy()
+    except Exception:
+        return
 
 
 def build_config(args: argparse.Namespace) -> WorkerConfig:

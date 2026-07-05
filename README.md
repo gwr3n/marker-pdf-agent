@@ -66,7 +66,7 @@ To create a clickable launcher in the managed folder, run:
 marker-pdf-agent install-launcher --root /path/to/folder
 ```
 
-The installer writes the native launcher format for the current operating system: a `.app` bundle on macOS, a `.desktop` file on Linux, or a `.cmd` launcher on Windows. The launcher starts the status-bar app for that folder using the Python environment that created it, so it does not depend on your desktop session inheriting the same `PATH` as your terminal. Use `--launcher-name "Marker PDF Agent"` to choose a different display name.
+The installer writes the native launcher format for the current operating system: a `.app` bundle on macOS, a `.desktop` file on Linux, or a `.cmd` launcher on Windows. The launcher starts the status-bar app for that folder using the Python environment that created it, so it does not depend on your desktop session inheriting the same `PATH` as your terminal. Use `--launcher-name "Marker PDF Agent"` to choose a different display name. On macOS, launcher output is appended to `.marker-pdf-agent/launcher.log` under the managed folder. If macOS blocks a launcher from reading a virtual environment under a protected folder such as `Downloads`, `Desktop`, or `Documents`, move the managed folder or environment outside that protected location, or grant the launcher Full Disk Access, then reinstall the launcher.
 
 Click the status-bar icon to open the menu. From there you can add or remove monitored folders, choose an Ollama routing model, refresh the installed Ollama model list, and quit cleanly. Detailed progress and routing messages are printed to the terminal that launched the app.
 

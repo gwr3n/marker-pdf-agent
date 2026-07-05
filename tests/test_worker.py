@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import plistlib
 import subprocess
 from argparse import Namespace
 from pathlib import Path
@@ -8,6 +9,7 @@ from subprocess import CompletedProcess
 import pytest
 
 from marker_pdf_agent.worker import (
+    GUI_DEPENDENCY_ERROR,
     ConversionJob,
     MarkerPdfWorker,
     SingletonLock,
@@ -33,6 +35,7 @@ from marker_pdf_agent.worker import (
     save_monitored_roots,
     service_label,
     service_run_arguments,
+    show_error_box,
     singleton_lock_path,
     unique_path,
 )
@@ -648,16 +651,47 @@ def test_build_tray_configs_persists_explicit_and_saved_roots(monkeypatch, tmp_p
     assert [config.ollama_model for config in configs] == ["llama3.1:latest", "llama3.1:latest"]
 
 
-def test_run_tray_reports_missing_gui_dependency(monkeypatch, tmp_path: Path) -> None:
+def test_run_tray_reports_missing_gui_dependency(monkeypatch, capsys, tmp_path: Path) -> None:
     args = parse_args(["tray", "--root", str(tmp_path), "--config", str(tmp_path / "config.json"), "--no-ollama"])
+    reported: list[tuple[str, str]] = []
 
     def fake_run_tray_app(_manager: WorkerManager, _args: Namespace, _config_path: Path) -> None:
         raise RuntimeError('install GUI dependencies with: venv/bin/python -m pip install ".[gui]"')
 
     monkeypatch.setattr("marker_pdf_agent.tray.run_tray_app", fake_run_tray_app)
+    monkeypatch.setattr(
+        "marker_pdf_agent.worker.show_error_box", lambda title, message: reported.append((title, message))
+    )
 
-    with pytest.raises(RuntimeError, match="install GUI dependencies"):
+    with pytest.raises(SystemExit) as exc_info:
         run_tray(args)
+
+    assert exc_info.value.code == 1
+    assert reported == [("Marker PDF Agent", GUI_DEPENDENCY_ERROR)]
+    assert GUI_DEPENDENCY_ERROR in capsys.readouterr().err
+
+
+def test_show_error_box_uses_macos_alert(monkeypatch) -> None:
+    commands: list[tuple[list[str], bool]] = []
+
+    def fake_run(command: list[str], check: bool) -> None:
+        commands.append((command, check))
+
+    monkeypatch.setattr("marker_pdf_agent.worker.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("marker_pdf_agent.worker.subprocess.run", fake_run)
+
+    show_error_box("Marker PDF Agent", 'Install "marker-pdf-agent[gui]"')
+
+    assert commands == [
+        (
+            [
+                "osascript",
+                "-e",
+                'display alert "Marker PDF Agent" message "Install \\"marker-pdf-agent[gui]\\"" as critical',
+            ],
+            False,
+        )
+    ]
 
 
 def test_service_run_arguments_use_current_python_and_run_subcommand(monkeypatch, tmp_path: Path) -> None:
@@ -743,10 +777,57 @@ def test_install_macos_app_launcher_writes_app_bundle(monkeypatch, tmp_path: Pat
 
     assert path == root / "Marker PDF Agent.app"
     executable = path / "Contents" / "MacOS" / "marker-pdf-agent"
-    assert executable.read_text(encoding="utf-8").startswith("#!/bin/sh\nexec /example/python -m")
-    assert "marker_pdf_agent.worker tray --root" in executable.read_text(encoding="utf-8")
+    executable_text = executable.read_text(encoding="utf-8")
+    assert executable_text.startswith(f"#!/bin/sh\ncd '{root}'\n/usr/bin/nohup /example/python -m")
+    assert "marker_pdf_agent.worker tray --root" in executable_text
+    assert f">> '{root}/.marker-pdf-agent/launcher.log' 2>&1 &\nexit 0" in executable_text
     assert executable.stat().st_mode & 0o111
-    assert "Marker PDF Agent" in (path / "Contents" / "Info.plist").read_text(encoding="utf-8")
+    assert (root / ".marker-pdf-agent").is_dir()
+    with (path / "Contents" / "Info.plist").open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["CFBundleDisplayName"] == "Marker PDF Agent"
+    assert plist["CFBundleIdentifier"].startswith("local.marker-pdf-agent.launcher.")
+    assert plist["CFBundleIdentifier"] != "local.marker-pdf-agent.launcher"
+    assert "LSUIElement" not in plist
+
+
+def test_install_macos_app_launcher_preflights_venv_access(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "managed folder"
+    root.mkdir()
+    python_path = root / "venv" / "bin" / "python"
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text("", encoding="utf-8")
+    (root / "venv" / "pyvenv.cfg").write_text("home = /example\n", encoding="utf-8")
+    monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", str(python_path))
+    args = parse_args(["install-launcher", "--root", str(root), "--launcher-name", "Marker PDF Agent"])
+
+    path = install_macos_app_launcher(args)
+
+    executable_text = (path / "Contents" / "MacOS" / "marker-pdf-agent").read_text(encoding="utf-8")
+    assert f"if ! /bin/cat '{root}/venv/pyvenv.cfg' >/dev/null 2>&1; then" in executable_text
+    assert "/usr/bin/osascript -e" in executable_text
+    assert "macOS may be blocking app access to this folder" in executable_text
+    assert f">> '{root}/.marker-pdf-agent/launcher.log'" in executable_text
+
+
+def test_install_macos_app_launcher_preflights_symlinked_venv_python(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "managed folder"
+    root.mkdir()
+    python_target = tmp_path / "Python.framework" / "Versions" / "3.13" / "bin" / "python3.13"
+    python_target.parent.mkdir(parents=True)
+    python_target.write_text("", encoding="utf-8")
+    python_path = root / "venv" / "bin" / "python"
+    python_path.parent.mkdir(parents=True)
+    python_path.symlink_to(python_target)
+    (root / "venv" / "pyvenv.cfg").write_text("home = /example\n", encoding="utf-8")
+    monkeypatch.setattr("marker_pdf_agent.worker.sys.executable", str(python_path))
+    args = parse_args(["install-launcher", "--root", str(root), "--launcher-name", "Marker PDF Agent"])
+
+    path = install_macos_app_launcher(args)
+
+    executable_text = (path / "Contents" / "MacOS" / "marker-pdf-agent").read_text(encoding="utf-8")
+    assert f"if ! /bin/cat '{root}/venv/pyvenv.cfg' >/dev/null 2>&1; then" in executable_text
+    assert str(python_target) not in executable_text
 
 
 def test_install_linux_desktop_launcher_writes_desktop_file(monkeypatch, tmp_path: Path) -> None:
